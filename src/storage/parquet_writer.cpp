@@ -30,6 +30,12 @@ bool ParquetWriter::write_trades(const std::string& filepath, std::span<const Tr
 
 bool ParquetWriter::write_table(const std::string& filepath, const std::shared_ptr<arrow::Table>& table,
                                 int64_t records_per_page) {
+    return write_table_with_metadata(filepath, table, nullptr, records_per_page);
+}
+
+bool ParquetWriter::write_table_with_metadata(const std::string& filepath, const std::shared_ptr<arrow::Table>& table,
+                                         const std::shared_ptr<arrow::KeyValueMetadata>& kv_metadata,
+                                         int64_t records_per_page) {
     if (!table || table->num_rows() == 0) {
         std::cerr << "[ParquetWriter] Cannot write null or empty table to " << filepath << "\n";
         return false;
@@ -43,17 +49,21 @@ bool ParquetWriter::write_table(const std::string& filepath, const std::shared_p
     }
     std::shared_ptr<arrow::io::FileOutputStream> outfile = *out_result;
 
-    // Build Parquet writer properties with Page Index enabled
+    std::shared_ptr<arrow::Table> write_tbl = table;
+    if (kv_metadata) {
+        write_tbl = table->ReplaceSchemaMetadata(kv_metadata);
+    }
+
     auto writer_props = parquet::WriterProperties::Builder()
                             .compression(parquet::Compression::SNAPPY)
                             ->enable_write_page_index()
-                            ->data_pagesize(records_per_page * 64)  // Target page byte size
+                            ->data_pagesize(records_per_page * 64)
                             ->build();
 
     auto arrow_props = parquet::ArrowWriterProperties::Builder().store_schema()->build();
 
     auto status =
-        parquet::arrow::WriteTable(*table, arrow::default_memory_pool(), outfile, 65536, writer_props, arrow_props);
+        parquet::arrow::WriteTable(*write_tbl, arrow::default_memory_pool(), outfile, 65536, writer_props, arrow_props);
     if (!status.ok()) {
         std::cerr << "[ParquetWriter] WriteTable failed: " << status.ToString() << "\n";
         return false;

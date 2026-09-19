@@ -42,6 +42,27 @@ std::shared_ptr<arrow::Table> ParquetReader::read_table(const std::string& filep
     return *table_result;
 }
 
+std::string ParquetReader::read_embedded_index(const std::string& filepath) {
+    auto file_result = arrow::io::ReadableFile::Open(filepath);
+    if (!file_result.ok()) return "";
+    std::shared_ptr<arrow::io::ReadableFile> infile = *file_result;
+
+    auto reader_result = parquet::arrow::OpenFile(infile, arrow::default_memory_pool());
+    if (!reader_result.ok()) return "";
+    std::unique_ptr<parquet::arrow::FileReader> reader = std::move(*reader_result);
+
+    auto metadata = reader->parquet_reader()->metadata();
+    if (!metadata) return "";
+    auto kv_meta = metadata->key_value_metadata();
+    if (!kv_meta) return "";
+
+    int idx = kv_meta->FindKey("tick_db.index.v1");
+    if (idx >= 0) {
+        return kv_meta->value(idx);
+    }
+    return "";
+}
+
 bool ParquetReader::read_raw_columns(const std::string& filepath, std::vector<RawColumn>& out_columns,
                                      ParquetFileInfo* out_info) {
     out_columns.clear();

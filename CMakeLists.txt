@@ -26,6 +26,7 @@ add_library(tick_db_lib
     src/query/query_engine.cpp
     src/clustering/compactor.cpp
     src/catalog/catalog.cpp
+    src/backfill/csv_backfiller.cpp
 )
 
 target_link_libraries(tick_db_lib
@@ -58,6 +59,15 @@ add_executable(tick_db_test
 )
 
 target_link_libraries(tick_db_test
+    PRIVATE
+    tick_db_lib
+)
+
+add_executable(tick_db_cli
+    src/cli/main_cli.cpp
+)
+
+target_link_libraries(tick_db_cli
     PRIVATE
     tick_db_lib
 )

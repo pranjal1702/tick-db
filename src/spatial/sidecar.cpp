@@ -1,7 +1,10 @@
 #include "spatial/sidecar.h"
+#include "spatial/varint.h"
+#include "storage/parquet_reader.h"
 
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <vector>
 
 namespace tick_db {
@@ -14,6 +17,13 @@ bool SidecarIndex::write_index(const std::string& index_path, const Hierarchical
         std::cerr << "[SidecarIndex] Failed to open index file for writing: " << index_path << "\n";
         return false;
     }
+    std::string payload = serialize_to_string(rtree);
+    out.write(payload.data(), payload.size());
+    return true;
+}
+
+std::string SidecarIndex::serialize_to_string(const HierarchicalRTree& rtree) {
+    std::ostringstream out(std::ios::binary);
 
     out.write(reinterpret_cast<const char*>(&SIDECAR_MAGIC), sizeof(SIDECAR_MAGIC));
 
@@ -31,6 +41,7 @@ bool SidecarIndex::write_index(const std::string& index_path, const Hierarchical
         }
 
         out.write(reinterpret_cast<const char*>(&entry.row_group_id), sizeof(entry.row_group_id));
+        out.write(reinterpret_cast<const char*>(&entry.symbol_bitmask), sizeof(entry.symbol_bitmask));
 
         uint32_t path_len = static_cast<uint32_t>(entry.filepath.size());
         out.write(reinterpret_cast<const char*>(&path_len), sizeof(path_len));
@@ -53,20 +64,81 @@ bool SidecarIndex::write_index(const std::string& index_path, const Hierarchical
         }
     }
 
-    return true;
+    // Serialize Inverted Symbol Index Directory
+    const auto& sym_map = rtree.symbol_directory().map();
+    uint32_t sym_count = static_cast<uint32_t>(sym_map.size());
+    out.write(reinterpret_cast<const char*>(&sym_count), sizeof(sym_count));
+    for (const auto& [sym_id, rgs] : sym_map) {
+        out.write(reinterpret_cast<const char*>(&sym_id), sizeof(sym_id));
+        uint32_t rg_count = static_cast<uint32_t>(rgs.size());
+        out.write(reinterpret_cast<const char*>(&rg_count), sizeof(rg_count));
+        if (rg_count > 0) {
+            out.write(reinterpret_cast<const char*>(rgs.data()), rg_count * sizeof(uint32_t));
+        }
+    }
+
+    // Serialize Sub-Row-Group Symbol Range Directory with Delta-Varint LEB128 Compression
+    const auto& ranges_map = rtree.symbol_directory().ranges_map();
+    uint32_t range_sym_count = static_cast<uint32_t>(ranges_map.size());
+    out.write(reinterpret_cast<const char*>(&range_sym_count), sizeof(range_sym_count));
+
+    for (const auto& [sym_id, ranges] : ranges_map) {
+        out.write(reinterpret_cast<const char*>(&sym_id), sizeof(sym_id));
+        uint32_t r_count = static_cast<uint32_t>(ranges.size());
+        out.write(reinterpret_cast<const char*>(&r_count), sizeof(r_count));
+
+        std::vector<uint8_t> varint_buf;
+        uint32_t prev_start = 0;
+        uint32_t prev_rg = 0;
+
+        for (const auto& r : ranges) {
+            uint32_t delta_rg = r.row_group_id - prev_rg;
+            uint32_t delta_start = (r.row_group_id == prev_rg) ? (r.start_row - prev_start) : r.start_row;
+
+            Varint::encode(delta_rg, varint_buf);
+            Varint::encode(delta_start, varint_buf);
+            Varint::encode(r.count, varint_buf);
+
+            prev_rg = r.row_group_id;
+            prev_start = r.start_row;
+        }
+
+        uint32_t compressed_bytes = static_cast<uint32_t>(varint_buf.size());
+        out.write(reinterpret_cast<const char*>(&compressed_bytes), sizeof(compressed_bytes));
+        if (compressed_bytes > 0) {
+            out.write(reinterpret_cast<const char*>(varint_buf.data()), compressed_bytes);
+        }
+    }
+
+    return out.str();
 }
 
 bool SidecarIndex::read_index(const std::string& index_path, HierarchicalRTree& out_rtree) {
+    // 1. Try reading embedded index from Parquet KeyValueMetadata ("tick_db.index.v1")
+    std::string embedded = ParquetReader::read_embedded_index(index_path);
+    if (!embedded.empty()) {
+        return deserialize_from_string(embedded, out_rtree);
+    }
+
+    // 2. Fallback to external .index sidecar file
     std::ifstream in(index_path, std::ios::binary);
     if (!in) {
-        std::cerr << "[SidecarIndex] Failed to open index file for reading: " << index_path << "\n";
         return false;
     }
+    std::stringstream ss;
+    ss << in.rdbuf();
+    return deserialize_from_string(ss.str(), out_rtree);
+}
+
+bool SidecarIndex::deserialize_from_string(const std::string& payload, HierarchicalRTree& out_rtree) {
+    if (payload.empty()) return false;
+
+    std::istringstream in(payload, std::ios::binary);
 
     uint32_t magic = 0;
     in.read(reinterpret_cast<char*>(&magic), sizeof(magic));
     if (magic != SIDECAR_MAGIC) {
-        std::cerr << "[SidecarIndex] Invalid sidecar magic header in " << index_path << "\n";
+        std::cerr << "[SidecarIndex] Invalid sidecar magic header in stream payload\n";
         return false;
     }
 
@@ -87,6 +159,7 @@ bool SidecarIndex::read_index(const std::string& index_path, HierarchicalRTree& 
         }
 
         in.read(reinterpret_cast<char*>(&entry.row_group_id), sizeof(entry.row_group_id));
+        in.read(reinterpret_cast<char*>(&entry.symbol_bitmask), sizeof(entry.symbol_bitmask));
 
         uint32_t path_len = 0;
         in.read(reinterpret_cast<char*>(&path_len), sizeof(path_len));
@@ -114,6 +187,63 @@ bool SidecarIndex::read_index(const std::string& index_path, HierarchicalRTree& 
         }
 
         tree.insert(entry);
+    }
+
+    // Deserialize Inverted Symbol Index Directory
+    uint32_t sym_count = 0;
+    if (in.read(reinterpret_cast<char*>(&sym_count), sizeof(sym_count))) {
+        for (uint32_t s = 0; s < sym_count; ++s) {
+            uint32_t sym_id = 0;
+            uint32_t rg_count = 0;
+            in.read(reinterpret_cast<char*>(&sym_id), sizeof(sym_id));
+            in.read(reinterpret_cast<char*>(&rg_count), sizeof(rg_count));
+            std::vector<uint32_t> rgs(rg_count);
+            if (rg_count > 0) {
+                in.read(reinterpret_cast<char*>(rgs.data()), rg_count * sizeof(uint32_t));
+            }
+            for (uint32_t rg_id : rgs) {
+                tree.symbol_directory().add_row_group(sym_id, rg_id);
+            }
+        }
+    }
+
+    // Deserialize Sub-Row-Group Symbol Range Directory with Delta-Varint LEB128 Decoding
+    uint32_t range_sym_count = 0;
+    if (in.read(reinterpret_cast<char*>(&range_sym_count), sizeof(range_sym_count))) {
+        for (uint32_t s = 0; s < range_sym_count; ++s) {
+            uint32_t sym_id = 0;
+            uint32_t r_count = 0;
+            in.read(reinterpret_cast<char*>(&sym_id), sizeof(sym_id));
+            in.read(reinterpret_cast<char*>(&r_count), sizeof(r_count));
+
+            uint32_t compressed_bytes = 0;
+            in.read(reinterpret_cast<char*>(&compressed_bytes), sizeof(compressed_bytes));
+
+            if (compressed_bytes > 0) {
+                std::vector<uint8_t> varint_buf(compressed_bytes);
+                in.read(reinterpret_cast<char*>(varint_buf.data()), compressed_bytes);
+
+                const uint8_t* ptr = varint_buf.data();
+                const uint8_t* end = ptr + compressed_bytes;
+
+                uint32_t prev_rg = 0;
+                uint32_t prev_start = 0;
+
+                for (uint32_t r = 0; r < r_count; ++r) {
+                    uint32_t delta_rg = Varint::decode(ptr, end);
+                    uint32_t delta_start = Varint::decode(ptr, end);
+                    uint32_t count_val = Varint::decode(ptr, end);
+
+                    uint32_t curr_rg = prev_rg + delta_rg;
+                    uint32_t curr_start = (curr_rg == prev_rg) ? (prev_start + delta_start) : delta_start;
+
+                    tree.symbol_directory().add_symbol_range(sym_id, curr_rg, curr_start, count_val);
+
+                    prev_rg = curr_rg;
+                    prev_start = curr_start;
+                }
+            }
+        }
     }
 
     out_rtree = std::move(tree);
