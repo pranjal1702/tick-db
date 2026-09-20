@@ -4,10 +4,13 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <algorithm>
 
 #include "catalog/database_config.h"
 #include "query/sql_query_engine.h"
 #include "schemas/trade.h"
+#include "schemas/ohlcv.h"
+#include "schemas/quote.h"
 
 static void print_banner() {
     std::cout << "======================================================\n";
@@ -26,54 +29,150 @@ static void print_help() {
     std::cout << "  .exit            : Exit tick_db_cli\n\n";
     std::cout << "SQL Query Examples:\n";
     std::cout << "  SELECT * FROM trades WHERE symbol = 'AAPL' AND price >= 15000;\n";
-    std::cout << "  SELECT * FROM trades WHERE symbol = 'MSFT' AND ts_exchange_ns BETWEEN 1000000 AND 2000000;\n\n";
+    std::cout << "  SELECT * FROM ohlcv WHERE symbol = 'MSFT' AND ts_exchange_ns BETWEEN 1000000 AND 2000000;\n\n";
 }
 
-static void execute_cli_sql(const std::string& parquet_file, const std::string& sql) {
-    if (!std::filesystem::exists(parquet_file)) {
-        std::cerr << "[tick_db_cli] Error: Data file not found: " << parquet_file << "\n";
-        return;
-    }
+static std::vector<std::string> find_schema_files(const std::string& db_path, const std::string& table_name) {
+    std::vector<std::string> paths;
+    std::filesystem::path root(db_path);
+    if (!std::filesystem::exists(root)) return paths;
 
+    // Search for any data.parquet files that fall under a directory matching the table_name
+    for (auto it = std::filesystem::recursive_directory_iterator(root);
+         it != std::filesystem::recursive_directory_iterator(); ++it) {
+        if (it->is_regular_file() && it->path().filename() == "data.parquet") {
+            std::string full_path = it->path().string();
+            if (full_path.find("/" + table_name + "/") != std::string::npos ||
+                full_path.find("\\" + table_name + "\\") != std::string::npos) {
+                paths.push_back(full_path);
+            }
+        }
+    }
+    
+    // Sort paths to keep time-ascending order (assuming date is in the path)
+    std::sort(paths.begin(), paths.end());
+    return paths;
+}
+
+template <tick_db::SpatialRecord T>
+static void execute_cli_sql_stream(const std::vector<std::string>& files, const std::string& sql, tick_db::ParsedSqlQuery& parsed) {
     auto start_time = std::chrono::high_resolution_clock::now();
     tick_db::QueryMetrics metrics;
-    auto stream = tick_db::SqlQueryEngine::execute_sql_stream<tick_db::Trade>(parquet_file, sql, &metrics);
-    auto end_time = std::chrono::high_resolution_clock::now();
+    
+    // Build query MBR based on parsed
+    tick_db::GenericMBR query_mbr;
+    size_t dims = tick_db::record_dimensions_v<T>;
+    query_mbr.min_bounds.assign(dims, 0);
+    query_mbr.max_bounds.assign(dims, std::numeric_limits<int64_t>::max());
 
+    if (dims > 0) {
+        query_mbr.min_bounds[0] = static_cast<int64_t>(parsed.min_ts);
+        query_mbr.max_bounds[0] = static_cast<int64_t>(parsed.max_ts);
+    }
+    if (dims >= 3 && parsed.min_price != std::numeric_limits<int64_t>::min()) {
+        query_mbr.min_bounds[2] = parsed.min_price;
+    }
+    if (dims >= 3 && parsed.max_price != std::numeric_limits<int64_t>::max()) {
+        query_mbr.max_bounds[2] = parsed.max_price;
+    }
+
+    auto stream = tick_db::QueryEngine::execute_multi_day_stream<T>(files, query_mbr, parsed.symbol);
+    auto end_time = std::chrono::high_resolution_clock::now();
     double elapsed_us = std::chrono::duration<double, std::micro>(end_time - start_time).count();
 
+    // Consume stream up to 20 rows
+    std::vector<T> results;
+    while (stream.has_next() && results.size() < 20) {
+        results.push_back(stream.next());
+    }
+    
+    // Continue counting the rest to get accurate metrics
+    size_t total_matching = results.size();
+    while (stream.has_next()) {
+        stream.next();
+        total_matching++;
+    }
+
+    // Attempt to get metrics from one of the sub-streams? MultiDayRecordStream hides it,
+    // so we will just display general stream metrics.
+    
     std::cout << "\n+----------------------+-------------------+-------------------+----------+------+\n";
-    std::cout << "| Timestamp (ns)       | Seq No            | Price ($)         | Size     | Side |\n";
+    std::cout << "| Timestamp (ns)       | Symbol            | Price ($)         | Size/Vol | Info |\n";
     std::cout << "+----------------------+-------------------+-------------------+----------+------+\n";
 
-    size_t count = 0;
-    while (stream.has_next() && count < 20) {
-        auto trade = stream.next();
-        count++;
-        double print_px = static_cast<double>(trade.price) / 100000000.0;
-        if (print_px == 0) print_px = static_cast<double>(trade.price) / 100.0; // scale fallback
+    for (const auto& rec : results) {
+        double print_px = 0.0;
+        int64_t size_val = 0;
+        std::string info_str = "";
+        std::string sym = parsed.symbol.empty() ? "N/A" : parsed.symbol; // Simplification for UI
 
-        std::cout << "| " << std::setw(20) << trade.ts_exchange_ns
-                  << " | " << std::setw(17) << trade.seq_no
+        if constexpr (std::is_same_v<T, tick_db::Trade>) {
+            print_px = static_cast<double>(rec.price) / 100000000.0;
+            size_val = rec.size;
+            info_str = (rec.side == tick_db::Side::Bid ? "BUY" : "SELL");
+        } else if constexpr (std::is_same_v<T, tick_db::OhlcvRecord>) {
+            print_px = static_cast<double>(rec.close) / 100000000.0;
+            size_val = rec.volume;
+            info_str = "OHLCV";
+            sym = rec.symbol;
+        }
+
+        if (print_px == 0 && !std::is_same_v<T, tick_db::OhlcvRecord>) {
+            // Unsafe assumption, but for display formatting fallback
+            print_px = 0.0; 
+        }
+
+        std::cout << "| " << std::setw(20) << rec.ts_exchange_ns
+                  << " | " << std::setw(17) << sym
                   << " | $" << std::setw(16) << std::fixed << std::setprecision(2) << print_px
-                  << " | " << std::setw(8) << trade.size
-                  << " | " << std::setw(4) << (trade.side == tick_db::Side::Bid ? "BUY" : "SELL") << " |\n";
+                  << " | " << std::setw(8) << size_val
+                  << " | " << std::setw(4) << info_str << " |\n";
     }
     std::cout << "+----------------------+-------------------+-------------------+----------+------+\n";
 
-    if (stream.total_matching() > 20) {
-        std::cout << "... (" << (stream.total_matching() - 20) << " more rows matching in stream)\n";
+    if (total_matching > 20) {
+        std::cout << "... (" << (total_matching - 20) << " more rows matching in stream)\n";
     }
 
     std::cout << "\n------------------------------------------------------\n";
     std::cout << " Query Performance Metrics:\n";
     std::cout << "------------------------------------------------------\n";
     std::cout << " Execution Latency:     " << std::fixed << std::setprecision(2) << elapsed_us << " microseconds (us)\n";
-    std::cout << " Records Examined:      " << metrics.records_examined << "\n";
-    std::cout << " Records Returned:      " << stream.total_matching() << "\n";
-    std::cout << " Read Amplification:    " << std::setprecision(2) << (metrics.read_amplification > 0 ? metrics.read_amplification : 1.0) << "x (0% Wasted IO)\n";
-    std::cout << " Memory Footprint:      O(1) Constant (256 KB Stream Ring Buffer)\n";
+    std::cout << " Records Returned:      " << total_matching << "\n";
+    std::cout << " Target Files:          " << files.size() << "\n";
+    std::cout << " Memory Footprint:      O(1) Constant (Streaming)\n";
     std::cout << "------------------------------------------------------\n\n";
+}
+
+static void execute_cli_sql(const std::string& sql) {
+    tick_db::ParsedSqlQuery parsed = tick_db::SqlQueryEngine::parse(sql);
+    
+    if (parsed.table_name.empty()) {
+        std::cerr << "[tick_db_cli] Error: Could not parse table name from query.\n";
+        return;
+    }
+
+    std::string db_path = tick_db::DatabaseConfig::instance().db_root_path();
+    std::vector<std::string> files = find_schema_files(db_path, parsed.table_name);
+    
+    if (files.empty()) {
+        // Fallback for tests
+        std::string fallback = "/tmp/embedded_index_test.parquet";
+        if (std::filesystem::exists(fallback)) {
+            files.push_back(fallback);
+        } else {
+            std::cerr << "[tick_db_cli] Error: No data partitions found for schema '" << parsed.table_name << "' in " << db_path << "\n";
+            return;
+        }
+    }
+
+    if (parsed.table_name == "trades" || parsed.table_name == "trade") {
+        execute_cli_sql_stream<tick_db::Trade>(files, sql, parsed);
+    } else if (parsed.table_name == "ohlcv") {
+        execute_cli_sql_stream<tick_db::OhlcvRecord>(files, sql, parsed);
+    } else {
+        std::cerr << "[tick_db_cli] Error: Unsupported schema: " << parsed.table_name << "\n";
+    }
 }
 
 int main(int argc, char** argv) {
@@ -92,11 +191,7 @@ int main(int argc, char** argv) {
     tick_db::DatabaseConfig::instance().set_db_root_path(db_path);
 
     if (!direct_sql.empty()) {
-        std::string default_parquet = db_path + "/trades.parquet";
-        if (!std::filesystem::exists(default_parquet)) {
-            default_parquet = "/tmp/embedded_index_test.parquet";
-        }
-        execute_cli_sql(default_parquet, direct_sql);
+        execute_cli_sql(direct_sql);
         return 0;
     }
 
@@ -124,11 +219,7 @@ int main(int argc, char** argv) {
                 std::cout << "Storage Root Directory set to: " << new_path << "\n";
             }
         } else {
-            std::string default_parquet = tick_db::DatabaseConfig::instance().db_root_path() + "/trades.parquet";
-            if (!std::filesystem::exists(default_parquet)) {
-                default_parquet = "/tmp/embedded_index_test.parquet";
-            }
-            execute_cli_sql(default_parquet, line);
+            execute_cli_sql(line);
         }
     }
 

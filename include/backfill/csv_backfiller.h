@@ -13,10 +13,10 @@ class CsvBackfiller {
     CsvBackfiller() = default;
 
     // Backfill historical OHLCV data from CSV to time-sorted Parquet file with embedded spatial index
-    static bool backfill_ohlcv_from_csv(const std::string& csv_filepath, const std::string& output_parquet_path);
+    static bool backfill_ohlcv_from_csv(const std::string& csv_filepath, const std::string& output_parquet_path, const std::string& default_symbol = "UNKNOWN");
 
     // Backfill historical Trade data from CSV to time-sorted Parquet file with embedded spatial index
-    static bool backfill_trades_from_csv(const std::string& csv_filepath, const std::string& output_parquet_path);
+    static bool backfill_trades_from_csv(const std::string& csv_filepath, const std::string& output_parquet_path, const std::string& default_symbol = "UNKNOWN");
 };
 
 }  // namespace tick_db
