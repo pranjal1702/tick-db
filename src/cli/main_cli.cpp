@@ -90,6 +90,22 @@ static std::vector<std::string> find_schema_files(const std::string& db_path, co
     return paths;
 }
 
+static bool g_json_stream_mode = false;
+static bool g_binary_stream_mode = false;
+
+// 32-Byte Packed Binary Header & Struct layout for Ultra High Speed WebSockets / WebAssembly
+#pragma pack(push, 1)
+struct BinaryOhlcvPacket {
+    uint64_t timestamp_ns;
+    char symbol[8];       // Null-padded 8-byte ASCII ticker
+    int64_t open;         // Scaled int64 (10^8)
+    int64_t high;
+    int64_t low;
+    int64_t close;
+    int64_t volume;
+};
+#pragma pack(pop)
+
 template <tick_db::SpatialRecord T>
 static void execute_cli_sql_stream(const std::vector<std::string>& files, const std::string& sql, tick_db::ParsedSqlQuery& parsed) {
     auto start_time = std::chrono::high_resolution_clock::now();
@@ -117,29 +133,29 @@ static void execute_cli_sql_stream(const std::vector<std::string>& files, const 
         query_mbr.max_bounds[price_dim] = parsed.max_price;
     }
 
-    auto stream = tick_db::QueryEngine::execute_multi_day_stream<T>(files, query_mbr, parsed.symbol, parsed.side);
+    auto stream = tick_db::QueryEngine::execute_multi_day_stream<T>(files, query_mbr, parsed.symbols, parsed.side);
     auto end_time = std::chrono::high_resolution_clock::now();
     double elapsed_us = std::chrono::duration<double, std::micro>(end_time - start_time).count();
 
-    // Consume stream up to 20 rows
-    std::vector<T> results;
-    while (stream.has_next() && results.size() < 20) {
-        results.push_back(stream.next());
+    if (g_binary_stream_mode) {
+        // High-Speed Binary Streaming (Packed 56-Byte Records for WebSockets / WebAssembly)
+        while (stream.has_next()) {
+            auto rec = stream.next();
+            if constexpr (std::is_same_v<T, tick_db::OhlcvRecord>) {
+                BinaryOhlcvPacket pkt{};
+                pkt.timestamp_ns = rec.ts_exchange_ns;
+                std::strncpy(pkt.symbol, rec.symbol.c_str(), sizeof(pkt.symbol) - 1);
+                pkt.open = rec.open;
+                pkt.high = rec.high;
+                pkt.low = rec.low;
+                pkt.close = rec.close;
+                pkt.volume = rec.volume;
+                std::cout.write(reinterpret_cast<const char*>(&pkt), sizeof(pkt));
+            }
+        }
+        std::cout.flush();
+        return;
     }
-    
-    // Continue counting the rest to get accurate metrics
-    size_t total_matching = results.size();
-    while (stream.has_next()) {
-        stream.next();
-        total_matching++;
-    }
-
-    // Attempt to get metrics from one of the sub-streams? MultiDayRecordStream hides it,
-    // so we will just display general stream metrics.
-    
-    std::cout << "\n+--------------------+-------------------+-------------------+----------+------+\n";
-    std::cout << "| Time (YYYYMMDD:hh:mm:ss)| Symbol     | Price ($)         | Size/Vol | Info |\n";
-    std::cout << "+--------------------+-------------------+-------------------+----------+------+\n";
 
     auto format_ts = [](uint64_t ns) -> std::string {
         time_t sec = static_cast<time_t>(ns / 1000000000ULL);
@@ -152,11 +168,55 @@ static void execute_cli_sql_stream(const std::vector<std::string>& files, const 
         return std::to_string(ns);
     };
 
+    if (g_json_stream_mode) {
+        // Continuous JSON Lines output for Web API / Web Socket servers
+        while (stream.has_next()) {
+            auto rec = stream.next();
+            double print_px = 0.0;
+            int64_t size_val = 0;
+            std::string sym = "";
+
+            if constexpr (std::is_same_v<T, tick_db::Trade>) {
+                print_px = static_cast<double>(rec.price) / 100000000.0;
+                size_val = rec.size;
+                sym = tick_db::SymbolCatalog::instance().get_symbol(rec.symbol_id);
+            } else if constexpr (std::is_same_v<T, tick_db::OhlcvRecord>) {
+                print_px = static_cast<double>(rec.close) / 100000000.0;
+                size_val = rec.volume;
+                sym = rec.symbol;
+            }
+
+            std::cout << "{\"timestamp_ns\":" << rec.ts_exchange_ns
+                      << ",\"time\":\"" << format_ts(rec.ts_exchange_ns) << "\""
+                      << ",\"symbol\":\"" << sym << "\""
+                      << ",\"price\":" << std::fixed << std::setprecision(2) << print_px
+                      << ",\"volume\":" << size_val << "}\n";
+            std::cout.flush();
+        }
+        return;
+    }
+
+    // Interactive Terminal CLI Output
+    std::vector<T> results;
+    while (stream.has_next() && results.size() < 20) {
+        results.push_back(stream.next());
+    }
+    
+    size_t total_matching = results.size();
+    while (stream.has_next()) {
+        stream.next();
+        total_matching++;
+    }
+    
+    std::cout << "\n+--------------------+-------------------+-------------------+----------+------+\n";
+    std::cout << "| Time (YYYYMMDD:hh:mm:ss)| Symbol     | Price ($)         | Size/Vol | Info |\n";
+    std::cout << "+--------------------+-------------------+-------------------+----------+------+\n";
+
     for (const auto& rec : results) {
         double print_px = 0.0;
         int64_t size_val = 0;
         std::string info_str = "";
-        std::string sym = parsed.symbol.empty() ? "N/A" : parsed.symbol; // Simplification for UI
+        std::string sym = parsed.symbol.empty() ? "N/A" : parsed.symbol;
 
         if constexpr (std::is_same_v<T, tick_db::Trade>) {
             print_px = static_cast<double>(rec.price) / 100000000.0;
@@ -233,6 +293,10 @@ int main(int argc, char** argv) {
             db_path = argv[++i];
         } else if (arg == "--sql" && i + 1 < argc) {
             direct_sql = argv[++i];
+        } else if (arg == "--json-stream" || arg == "--stream") {
+            g_json_stream_mode = true;
+        } else if (arg == "--binary-stream" || arg == "--bin-stream") {
+            g_binary_stream_mode = true;
         }
     }
 

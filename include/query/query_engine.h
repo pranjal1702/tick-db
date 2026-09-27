@@ -32,10 +32,10 @@ class QueryEngine {
 
     template <SpatialRecord T>
     static RecordStream<T> execute_stream(const std::string& parquet_path, const std::string& sidecar_index_path,
-                                          const GenericMBR& query_mbr, uint32_t target_symbol_id = 0,
-                                          Side target_side = Side::None,
+                                          const GenericMBR& query_mbr, const std::vector<std::string>& target_symbols = {},
+                                          uint32_t target_symbol_id = 0, Side target_side = Side::None,
                                           QueryMetrics* out_metrics = nullptr) {
-        auto records = execute_query<T>(parquet_path, sidecar_index_path, query_mbr, target_symbol_id, target_side, out_metrics);
+        auto records = execute_query<T>(parquet_path, sidecar_index_path, query_mbr, target_symbols, target_symbol_id, target_side, out_metrics);
         return RecordStream<T>(std::move(records));
     }
 
@@ -45,17 +45,19 @@ class QueryEngine {
                                                  Side target_side = Side::None,
                                                  QueryMetrics* out_metrics = nullptr) {
         uint32_t sym_id = SymbolCatalog::instance().get_id(symbol);
-        return execute_stream<T>(parquet_path, sidecar_index_path, query_mbr, sym_id, target_side, out_metrics);
+        std::vector<std::string> syms = symbol.empty() ? std::vector<std::string>{} : std::vector<std::string>{symbol};
+        return execute_stream<T>(parquet_path, sidecar_index_path, query_mbr, syms, sym_id, target_side, out_metrics);
     }
 
     template <SpatialRecord T>
     static MultiDayRecordStream<T> execute_multi_day_stream(const std::vector<std::string>& parquet_paths,
-                                                            const GenericMBR& query_mbr, const std::string& symbol = "",
+                                                            const GenericMBR& query_mbr,
+                                                            const std::vector<std::string>& target_symbols = {},
                                                             Side target_side = Side::None) {
-        uint32_t sym_id = symbol.empty() ? 0 : SymbolCatalog::instance().get_id(symbol);
+        uint32_t sym_id = (target_symbols.size() == 1) ? SymbolCatalog::instance().get_id(target_symbols[0]) : 0;
         std::vector<RecordStream<T>> day_streams;
         for (const auto& path : parquet_paths) {
-            auto ds = execute_stream<T>(path, path, query_mbr, sym_id, target_side);
+            auto ds = execute_stream<T>(path, path, query_mbr, target_symbols, sym_id, target_side);
             if (ds.has_next()) {
                 day_streams.push_back(std::move(ds));
             }
@@ -63,17 +65,25 @@ class QueryEngine {
         return MultiDayRecordStream<T>(std::move(day_streams));
     }
 
-    // Fully generic 4-stage query engine pipeline for ANY SpatialRecord schema T
+    // Overload for single symbol string
     template <SpatialRecord T>
-    static std::vector<T> execute_query(const std::string& parquet_path, const std::string& sidecar_index_path,
-                                        const GenericMBR& query_mbr, QueryMetrics* out_metrics) {
-        return execute_query<T>(parquet_path, sidecar_index_path, query_mbr, 0, Side::None, out_metrics);
+    static MultiDayRecordStream<T> execute_multi_day_stream(const std::vector<std::string>& parquet_paths,
+                                                            const GenericMBR& query_mbr, const std::string& symbol,
+                                                            Side target_side = Side::None) {
+        std::vector<std::string> syms = symbol.empty() ? std::vector<std::string>{} : std::vector<std::string>{symbol};
+        return execute_multi_day_stream<T>(parquet_paths, query_mbr, syms, target_side);
     }
 
     template <SpatialRecord T>
     static std::vector<T> execute_query(const std::string& parquet_path, const std::string& sidecar_index_path,
-                                        const GenericMBR& query_mbr, uint32_t target_symbol_id = 0,
-                                        Side target_side = Side::None,
+                                        const GenericMBR& query_mbr, QueryMetrics* out_metrics) {
+        return execute_query<T>(parquet_path, sidecar_index_path, query_mbr, {}, 0, Side::None, out_metrics);
+    }
+
+    template <SpatialRecord T>
+    static std::vector<T> execute_query(const std::string& parquet_path, const std::string& sidecar_index_path,
+                                        const GenericMBR& query_mbr, const std::vector<std::string>& target_symbols = {},
+                                        uint32_t target_symbol_id = 0, Side target_side = Side::None,
                                         QueryMetrics* out_metrics = nullptr) {
         std::vector<T> matching_records;
         QueryMetrics metrics;
@@ -125,12 +135,18 @@ class QueryEngine {
             compact_ranges = rtree.symbol_directory().get_compact_symbol_ranges(target_symbol_id, 4);
         }
 
-        auto check_symbol = [target_symbol_id](const T& rec) -> bool {
-            if (target_symbol_id == 0) return true;
-            if constexpr (requires { rec.symbol_id; }) {
-                return rec.symbol_id == target_symbol_id;
+        auto check_symbol = [&target_symbols, target_symbol_id](const T& rec) -> bool {
+            if (!target_symbols.empty()) {
+                if constexpr (requires { rec.symbol; }) {
+                    return std::find(target_symbols.begin(), target_symbols.end(), rec.symbol) != target_symbols.end();
+                }
             }
-            return true; // if record type doesn't have symbol_id (like ohlcv, wait ohlcv has string symbol)
+            if (target_symbol_id > 0) {
+                if constexpr (requires { rec.symbol_id; }) {
+                    return rec.symbol_id == target_symbol_id;
+                }
+            }
+            return true;
         };
 
         auto check_side = [target_side](const T& rec) -> bool {
@@ -202,7 +218,7 @@ class QueryEngine {
     static std::vector<Trade> execute_trade_query(const std::string& parquet_path,
                                                   const std::string& sidecar_index_path, const GenericMBR& query_mbr,
                                                   QueryMetrics* out_metrics = nullptr) {
-        return execute_query<Trade>(parquet_path, sidecar_index_path, query_mbr, 0, Side::None, out_metrics);
+        return execute_query<Trade>(parquet_path, sidecar_index_path, query_mbr, {}, 0, Side::None, out_metrics);
     }
 };
 

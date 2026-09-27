@@ -17,6 +17,7 @@ namespace tick_db {
 struct ParsedSqlQuery {
     std::string table_name;
     std::string symbol;
+    std::vector<std::string> symbols;
     uint64_t min_ts{0};
     uint64_t max_ts{static_cast<uint64_t>(std::numeric_limits<int64_t>::max())};
     int64_t min_price{std::numeric_limits<int64_t>::min()};
@@ -44,14 +45,39 @@ class SqlQueryEngine {
             q.table_name = sql.substr(start, end - start);
         }
 
-        // Extract symbol = 'XYZ' or symbol = "XYZ"
+        // Extract symbol IN ('A', 'B') or symbol = 'XYZ'
         size_t sym_pos = lower_sql.find("symbol");
         if (sym_pos != std::string::npos) {
-            size_t quote1 = sql.find_first_of("'\"", sym_pos);
-            if (quote1 != std::string::npos) {
-                size_t quote2 = sql.find_first_of("'\"", quote1 + 1);
-                if (quote2 != std::string::npos) {
-                    q.symbol = sql.substr(quote1 + 1, quote2 - quote1 - 1);
+            size_t in_pos = lower_sql.find("in", sym_pos);
+            size_t eq_pos = lower_sql.find("=", sym_pos);
+            if (in_pos != std::string::npos && (eq_pos == std::string::npos || in_pos < eq_pos)) {
+                size_t p1 = sql.find("(", in_pos);
+                size_t p2 = sql.find(")", p1 != std::string::npos ? p1 : in_pos);
+                if (p1 != std::string::npos && p2 != std::string::npos) {
+                    std::string in_content = sql.substr(p1 + 1, p2 - p1 - 1);
+                    std::stringstream ss(in_content);
+                    std::string item;
+                    while (std::getline(ss, item, ',')) {
+                        size_t q1 = item.find_first_of("'\"");
+                        size_t q2 = item.find_last_of("'\"");
+                        if (q1 != std::string::npos && q2 != std::string::npos && q2 > q1) {
+                            q.symbols.push_back(item.substr(q1 + 1, q2 - q1 - 1));
+                        } else {
+                            // Trim spaces if unquoted
+                            while (!item.empty() && std::isspace(item.front())) item.erase(0, 1);
+                            while (!item.empty() && std::isspace(item.back())) item.erase(0, 1);
+                            if (!item.empty()) q.symbols.push_back(item);
+                        }
+                    }
+                }
+            } else if (eq_pos != std::string::npos) {
+                size_t quote1 = sql.find_first_of("'\"", eq_pos);
+                if (quote1 != std::string::npos) {
+                    size_t quote2 = sql.find_first_of("'\"", quote1 + 1);
+                    if (quote2 != std::string::npos) {
+                        q.symbol = sql.substr(quote1 + 1, quote2 - quote1 - 1);
+                        q.symbols.push_back(q.symbol);
+                    }
                 }
             }
         }
