@@ -32,24 +32,60 @@ static void print_help() {
     std::cout << "  SELECT * FROM ohlcv WHERE symbol = 'MSFT' AND ts_exchange_ns BETWEEN 1000000 AND 2000000;\n\n";
 }
 
-static std::vector<std::string> find_schema_files(const std::string& db_path, const std::string& table_name) {
+static std::vector<std::string> find_schema_files(const std::string& db_path, const tick_db::ParsedSqlQuery& parsed) {
     std::vector<std::string> paths;
     std::filesystem::path root(db_path);
     if (!std::filesystem::exists(root)) return paths;
 
-    // Search for any data.parquet files that fall under a directory matching the table_name
+    // Convert nanosecond min_ts / max_ts to YYYY-MM-DD date strings if bounded
+    std::string start_date_str = "";
+    std::string end_date_str = "";
+
+    if (parsed.min_ts > 0) {
+        time_t sec = static_cast<time_t>(parsed.min_ts / 1000000000ULL);
+        struct tm tm_buf;
+        if (gmtime_r(&sec, &tm_buf)) {
+            char buf[16];
+            strftime(buf, sizeof(buf), "%Y-%m-%d", &tm_buf);
+            start_date_str = buf;
+        }
+    }
+
+    if (parsed.max_ts < static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+        time_t sec = static_cast<time_t>(parsed.max_ts / 1000000000ULL);
+        struct tm tm_buf;
+        if (gmtime_r(&sec, &tm_buf)) {
+            char buf[16];
+            strftime(buf, sizeof(buf), "%Y-%m-%d", &tm_buf);
+            end_date_str = buf;
+        }
+    }
+
+    // Search for data.parquet files that match schema and fall within date bounds
     for (auto it = std::filesystem::recursive_directory_iterator(root);
          it != std::filesystem::recursive_directory_iterator(); ++it) {
         if (it->is_regular_file() && it->path().filename() == "data.parquet") {
             std::string full_path = it->path().string();
-            if (full_path.find("/" + table_name + "/") != std::string::npos ||
-                full_path.find("\\" + table_name + "\\") != std::string::npos) {
+            if (full_path.find("/" + parsed.table_name + "/") != std::string::npos ||
+                full_path.find("\\" + parsed.table_name + "\\") != std::string::npos) {
+                
+                // Extract date=YYYY-MM-DD from path
+                size_t date_pos = full_path.find("date=");
+                if (date_pos != std::string::npos) {
+                    std::string folder_date = full_path.substr(date_pos + 5, 10);
+                    if (!start_date_str.empty() && folder_date < start_date_str) {
+                        continue; // Prune partition!
+                    }
+                    if (!end_date_str.empty() && folder_date > end_date_str) {
+                        continue; // Prune partition!
+                    }
+                }
                 paths.push_back(full_path);
             }
         }
     }
     
-    // Sort paths to keep time-ascending order (assuming date is in the path)
+    // Sort paths to keep time-ascending order
     std::sort(paths.begin(), paths.end());
     return paths;
 }
@@ -67,7 +103,11 @@ static void execute_cli_sql_stream(const std::vector<std::string>& files, const 
 
     if (dims > 0) {
         query_mbr.min_bounds[0] = static_cast<int64_t>(parsed.min_ts);
-        query_mbr.max_bounds[0] = static_cast<int64_t>(parsed.max_ts);
+        if (parsed.max_ts == std::numeric_limits<uint64_t>::max()) {
+            query_mbr.max_bounds[0] = std::numeric_limits<int64_t>::max();
+        } else {
+            query_mbr.max_bounds[0] = static_cast<int64_t>(parsed.max_ts);
+        }
     }
     if (dims >= 3 && parsed.min_price != std::numeric_limits<int64_t>::min()) {
         query_mbr.min_bounds[2] = parsed.min_price;
@@ -76,7 +116,7 @@ static void execute_cli_sql_stream(const std::vector<std::string>& files, const 
         query_mbr.max_bounds[2] = parsed.max_price;
     }
 
-    auto stream = tick_db::QueryEngine::execute_multi_day_stream<T>(files, query_mbr, parsed.symbol);
+    auto stream = tick_db::QueryEngine::execute_multi_day_stream<T>(files, query_mbr, parsed.symbol, parsed.side);
     auto end_time = std::chrono::high_resolution_clock::now();
     double elapsed_us = std::chrono::duration<double, std::micro>(end_time - start_time).count();
 
@@ -96,9 +136,20 @@ static void execute_cli_sql_stream(const std::vector<std::string>& files, const 
     // Attempt to get metrics from one of the sub-streams? MultiDayRecordStream hides it,
     // so we will just display general stream metrics.
     
-    std::cout << "\n+----------------------+-------------------+-------------------+----------+------+\n";
-    std::cout << "| Timestamp (ns)       | Symbol            | Price ($)         | Size/Vol | Info |\n";
-    std::cout << "+----------------------+-------------------+-------------------+----------+------+\n";
+    std::cout << "\n+--------------------+-------------------+-------------------+----------+------+\n";
+    std::cout << "| Time (YYYYMMDD:hh:mm:ss)| Symbol     | Price ($)         | Size/Vol | Info |\n";
+    std::cout << "+--------------------+-------------------+-------------------+----------+------+\n";
+
+    auto format_ts = [](uint64_t ns) -> std::string {
+        time_t sec = static_cast<time_t>(ns / 1000000000ULL);
+        struct tm tm_buf;
+        if (gmtime_r(&sec, &tm_buf)) {
+            char buf[32];
+            strftime(buf, sizeof(buf), "%Y%m%d:%H:%M:%S", &tm_buf);
+            return buf;
+        }
+        return std::to_string(ns);
+    };
 
     for (const auto& rec : results) {
         double print_px = 0.0;
@@ -110,6 +161,7 @@ static void execute_cli_sql_stream(const std::vector<std::string>& files, const 
             print_px = static_cast<double>(rec.price) / 100000000.0;
             size_val = rec.size;
             info_str = (rec.side == tick_db::Side::Bid ? "BUY" : "SELL");
+            sym = tick_db::SymbolCatalog::instance().get_symbol(rec.symbol_id);
         } else if constexpr (std::is_same_v<T, tick_db::OhlcvRecord>) {
             print_px = static_cast<double>(rec.close) / 100000000.0;
             size_val = rec.volume;
@@ -117,18 +169,13 @@ static void execute_cli_sql_stream(const std::vector<std::string>& files, const 
             sym = rec.symbol;
         }
 
-        if (print_px == 0 && !std::is_same_v<T, tick_db::OhlcvRecord>) {
-            // Unsafe assumption, but for display formatting fallback
-            print_px = 0.0; 
-        }
-
-        std::cout << "| " << std::setw(20) << rec.ts_exchange_ns
+        std::cout << "| " << std::setw(22) << format_ts(rec.ts_exchange_ns)
                   << " | " << std::setw(17) << sym
                   << " | $" << std::setw(16) << std::fixed << std::setprecision(2) << print_px
                   << " | " << std::setw(8) << size_val
                   << " | " << std::setw(4) << info_str << " |\n";
     }
-    std::cout << "+----------------------+-------------------+-------------------+----------+------+\n";
+    std::cout << "+--------------------+-------------------+-------------------+----------+------+\n";
 
     if (total_matching > 20) {
         std::cout << "... (" << (total_matching - 20) << " more rows matching in stream)\n";
@@ -153,7 +200,7 @@ static void execute_cli_sql(const std::string& sql) {
     }
 
     std::string db_path = tick_db::DatabaseConfig::instance().db_root_path();
-    std::vector<std::string> files = find_schema_files(db_path, parsed.table_name);
+    std::vector<std::string> files = find_schema_files(db_path, parsed);
     
     if (files.empty()) {
         // Fallback for tests
@@ -189,6 +236,7 @@ int main(int argc, char** argv) {
     }
 
     tick_db::DatabaseConfig::instance().set_db_root_path(db_path);
+    tick_db::SymbolCatalog::instance().load(db_path);
 
     if (!direct_sql.empty()) {
         execute_cli_sql(direct_sql);

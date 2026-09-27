@@ -39,7 +39,7 @@ void test_generic_nd_rtree_5d_trade() {
 
     std::vector<tick_db::Trade> trades;
     for (uint64_t i = 1; i <= 2000; ++i) {
-        trades.push_back({1000000 + i * 10, i, static_cast<int64_t>(15000 + (i % 200)), static_cast<int64_t>(100 + i),
+        trades.push_back({1000000 + i * 10, i, 1, static_cast<int64_t>(15000 + (i % 200)), static_cast<int64_t>(100 + i),
                           tick_db::Side::Bid});
     }
 
@@ -54,8 +54,8 @@ void test_generic_nd_rtree_5d_trade() {
     assert(tick_db::SidecarIndex::read_index(test_index, restored));
 
     auto query_mbr = tick_db::extract_mbr(trades[0]);
-    query_mbr.min_bounds = {1000100, 10, 15010, 105, 66};
-    query_mbr.max_bounds = {1001000, 100, 15050, 200, 66};
+    query_mbr.min_bounds = {1000100, 10, 1, 15010, 105, static_cast<int64_t>(tick_db::Side::Bid)};
+    query_mbr.max_bounds = {1001000, 100, 1, 15050, 200, static_cast<int64_t>(tick_db::Side::Bid)};
 
     tick_db::QueryMetrics metrics;
     auto results = tick_db::QueryEngine::execute_query<tick_db::Trade>(test_parquet, test_index, query_mbr, &metrics);
@@ -241,7 +241,7 @@ void test_record_stream_and_embedded_parquet_index() {
 
     std::vector<tick_db::Trade> trades;
     for (uint64_t i = 1; i <= 100; ++i) {
-        trades.push_back({1000000 + i * 10, i, static_cast<int64_t>(15000 + i), 100, tick_db::Side::Bid});
+        trades.push_back({1000000 + i * 10, i, 1, static_cast<int64_t>(15000 + i), 100, tick_db::Side::Bid});
     }
 
     // Build RTree
@@ -269,7 +269,7 @@ void test_record_stream_and_embedded_parquet_index() {
                            std::numeric_limits<int64_t>::max()};
 
     tick_db::QueryMetrics metrics;
-    auto stream = tick_db::QueryEngine::execute_stream<tick_db::Trade>(test_parquet, test_parquet, full_mbr, 0, &metrics);
+    auto stream = tick_db::QueryEngine::execute_stream<tick_db::Trade>(test_parquet, test_parquet, full_mbr, 0, tick_db::Side::None, &metrics);
 
     size_t count = 0;
     for (const auto& trade : stream) {
@@ -290,7 +290,7 @@ void test_multi_day_stream_query() {
         std::vector<tick_db::Trade> day_trades;
         uint64_t base_ts = 1000000 + d * 1000000;
         for (uint64_t i = 1; i <= 100; ++i) {
-            day_trades.push_back({base_ts + i * 1000, i, static_cast<int64_t>(15000 + i), 100, tick_db::Side::Bid});
+            day_trades.push_back({base_ts + i * 1000, i, 1, static_cast<int64_t>(15000 + i), 100, tick_db::Side::Bid});
         }
 
         tick_db::TypedRTree<tick_db::Trade> rtree;
@@ -335,7 +335,7 @@ void test_sql_query_engine() {
 
     std::vector<tick_db::Trade> trades;
     for (uint64_t i = 1; i <= 100; ++i) {
-        trades.push_back({1000000 + i * 10, i, static_cast<int64_t>(15000 + i), 100, tick_db::Side::Bid});
+        trades.push_back({1000000 + i * 10, i, static_cast<uint16_t>(aapl_id), static_cast<int64_t>(15000 + i), 100, tick_db::Side::Bid});
     }
 
     tick_db::TypedRTree<tick_db::Trade> rtree;

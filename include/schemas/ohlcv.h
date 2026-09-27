@@ -23,7 +23,7 @@ struct OhlcvRecord {
     int64_t close{0};
     int64_t volume{0};
 
-    auto spatial_tuple() const { return std::tie(symbol, ts_exchange_ns, open, high, low, close, volume); }
+    auto spatial_tuple() const { return std::tie(ts_exchange_ns, symbol, open, high, low, close, volume); }
 };
 
 inline std::shared_ptr<arrow::Table> to_columns(std::span<const OhlcvRecord> records) {

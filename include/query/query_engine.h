@@ -33,26 +33,29 @@ class QueryEngine {
     template <SpatialRecord T>
     static RecordStream<T> execute_stream(const std::string& parquet_path, const std::string& sidecar_index_path,
                                           const GenericMBR& query_mbr, uint32_t target_symbol_id = 0,
+                                          Side target_side = Side::None,
                                           QueryMetrics* out_metrics = nullptr) {
-        auto records = execute_query<T>(parquet_path, sidecar_index_path, query_mbr, target_symbol_id, out_metrics);
+        auto records = execute_query<T>(parquet_path, sidecar_index_path, query_mbr, target_symbol_id, target_side, out_metrics);
         return RecordStream<T>(std::move(records));
     }
 
     template <SpatialRecord T>
     static RecordStream<T> execute_symbol_stream(const std::string& parquet_path, const std::string& sidecar_index_path,
                                                  const std::string& symbol, const GenericMBR& query_mbr,
+                                                 Side target_side = Side::None,
                                                  QueryMetrics* out_metrics = nullptr) {
         uint32_t sym_id = SymbolCatalog::instance().get_id(symbol);
-        return execute_stream<T>(parquet_path, sidecar_index_path, query_mbr, sym_id, out_metrics);
+        return execute_stream<T>(parquet_path, sidecar_index_path, query_mbr, sym_id, target_side, out_metrics);
     }
 
     template <SpatialRecord T>
     static MultiDayRecordStream<T> execute_multi_day_stream(const std::vector<std::string>& parquet_paths,
-                                                            const GenericMBR& query_mbr, const std::string& symbol = "") {
+                                                            const GenericMBR& query_mbr, const std::string& symbol = "",
+                                                            Side target_side = Side::None) {
         uint32_t sym_id = symbol.empty() ? 0 : SymbolCatalog::instance().get_id(symbol);
         std::vector<RecordStream<T>> day_streams;
         for (const auto& path : parquet_paths) {
-            auto ds = execute_stream<T>(path, path, query_mbr, sym_id);
+            auto ds = execute_stream<T>(path, path, query_mbr, sym_id, target_side);
             if (ds.has_next()) {
                 day_streams.push_back(std::move(ds));
             }
@@ -64,12 +67,13 @@ class QueryEngine {
     template <SpatialRecord T>
     static std::vector<T> execute_query(const std::string& parquet_path, const std::string& sidecar_index_path,
                                         const GenericMBR& query_mbr, QueryMetrics* out_metrics) {
-        return execute_query<T>(parquet_path, sidecar_index_path, query_mbr, 0, out_metrics);
+        return execute_query<T>(parquet_path, sidecar_index_path, query_mbr, 0, Side::None, out_metrics);
     }
 
     template <SpatialRecord T>
     static std::vector<T> execute_query(const std::string& parquet_path, const std::string& sidecar_index_path,
                                         const GenericMBR& query_mbr, uint32_t target_symbol_id = 0,
+                                        Side target_side = Side::None,
                                         QueryMetrics* out_metrics = nullptr) {
         std::vector<T> matching_records;
         QueryMetrics metrics;
@@ -97,7 +101,22 @@ class QueryEngine {
         }
 
         // Stage 3 & 4: Parquet Page Reading & Generic MBR Spatial Filtering
-        std::vector<T> all_records = ParquetReader::read_records<T>(parquet_path);
+        std::vector<T> all_records;
+        if (has_index) {
+            std::vector<int> rg_indices;
+            rg_indices.reserve(candidate_rgs.size());
+            for (const auto& rg : candidate_rgs) {
+                rg_indices.push_back(rg.row_group_id);
+            }
+            if (rg_indices.empty()) {
+                all_records = {}; // Pruned!
+            } else {
+                all_records = ParquetReader::read_records<T>(parquet_path, rg_indices);
+            }
+        } else {
+            all_records = ParquetReader::read_records<T>(parquet_path);
+        }
+        
         metrics.pages_considered = (all_records.size() + 63) / 64;
 
         // Sub-Row-Group Symbol Range Slicing: Zero-Scan Pruning for Non-Matching Symbols
@@ -106,6 +125,22 @@ class QueryEngine {
             compact_ranges = rtree.symbol_directory().get_compact_symbol_ranges(target_symbol_id, 4);
         }
 
+        auto check_symbol = [target_symbol_id](const T& rec) -> bool {
+            if (target_symbol_id == 0) return true;
+            if constexpr (requires { rec.symbol_id; }) {
+                return rec.symbol_id == target_symbol_id;
+            }
+            return true; // if record type doesn't have symbol_id (like ohlcv, wait ohlcv has string symbol)
+        };
+
+        auto check_side = [target_side](const T& rec) -> bool {
+            if (target_side == Side::None) return true;
+            if constexpr (requires { rec.side; }) {
+                return rec.side == target_side;
+            }
+            return true;
+        };
+
         if (!compact_ranges.empty()) {
             size_t examined = 0;
             for (const auto& sr : compact_ranges) {
@@ -113,6 +148,8 @@ class QueryEngine {
                 for (size_t i = sr.start_row; i < end_idx; ++i) {
                     examined++;
                     const auto& rec = all_records[i];
+                    if (!check_symbol(rec)) continue;
+                    if (!check_side(rec)) continue;
                     auto rec_mbr = extract_mbr(rec);
                     if (rec_mbr.intersects(query_mbr)) {
                         matching_records.push_back(rec);
@@ -123,6 +160,8 @@ class QueryEngine {
         } else {
             metrics.records_examined = all_records.size();
             for (const auto& rec : all_records) {
+                if (!check_symbol(rec)) continue;
+                if (!check_side(rec)) continue;
                 auto rec_mbr = extract_mbr(rec);
                 if (rec_mbr.intersects(query_mbr)) {
                     matching_records.push_back(rec);
@@ -163,7 +202,7 @@ class QueryEngine {
     static std::vector<Trade> execute_trade_query(const std::string& parquet_path,
                                                   const std::string& sidecar_index_path, const GenericMBR& query_mbr,
                                                   QueryMetrics* out_metrics = nullptr) {
-        return execute_query<Trade>(parquet_path, sidecar_index_path, query_mbr, 0, out_metrics);
+        return execute_query<Trade>(parquet_path, sidecar_index_path, query_mbr, 0, Side::None, out_metrics);
     }
 };
 

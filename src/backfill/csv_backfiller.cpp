@@ -11,10 +11,23 @@
 
 namespace tick_db {
 
+#include <time.h>
+
 static uint64_t parse_timestamp_ns(const std::string& ts_str) {
     try {
         if (ts_str.find_first_not_of("0123456789") == std::string::npos) {
             return std::stoull(ts_str);
+        }
+        
+        // Try parsing YYYY-MM-DD HH:MM:SS
+        if (ts_str.find('-') != std::string::npos && ts_str.find(':') != std::string::npos) {
+            struct tm t;
+            if (strptime(ts_str.c_str(), "%Y-%m-%d %H:%M:%S", &t) != nullptr) {
+                time_t epoch = timegm(&t); // Assuming UTC, or mktime for local. Let's use mktime for local, or timegm for UTC. timegm is standard in linux.
+                if (epoch != -1) {
+                    return static_cast<uint64_t>(epoch) * 1000000000ULL;
+                }
+            }
         }
     } catch (...) {}
     return 1700000000000000000ULL;  // Fallback timestamp
@@ -55,10 +68,13 @@ bool CsvBackfiller::backfill_ohlcv_from_csv(const std::string& csv_filepath, con
         }
 
         try {
-            if (comma_count >= 6) {
+            std::string col2 = line.substr(p[0] + 1, p[1] - p[0] - 1);
+            bool col2_is_numeric = !col2.empty() && (col2.find_first_not_of("0123456789.") == std::string::npos);
+
+            if (comma_count >= 6 && col2_is_numeric) {
                 // Binance Public Trades format: aggregate on the fly!
                 is_aggregating = true;
-                std::string px_str = line.substr(p[0] + 1, p[1] - p[0] - 1);
+                std::string px_str = col2;
                 std::string sz_str = line.substr(p[1] + 1, p[2] - p[1] - 1);
                 std::string ts_str = line.substr(p[3] + 1, p[4] - p[3] - 1);
                 
@@ -88,25 +104,47 @@ bool CsvBackfiller::backfill_ohlcv_from_csv(const std::string& csv_filepath, con
                     current_candle.volume += size;
                 }
             } else if (comma_count >= 5) {
-                // Generic OHLCV format
-                std::string ts_str = line.substr(0, p[0]);
-                std::string sym = line.substr(p[0] + 1, p[1] - p[0] - 1);
-                std::string open_str = line.substr(p[1] + 1, p[2] - p[1] - 1);
-                std::string high_str = line.substr(p[2] + 1, p[3] - p[2] - 1);
-                std::string low_str = line.substr(p[3] + 1, p[4] - p[3] - 1);
-                std::string close_str = line.substr(p[4] + 1, p[5] - p[4] - 1);
-                size_t p6 = line.find(',', p[5] + 1);
-                std::string vol_str = line.substr(p[5] + 1, (p6 == std::string::npos ? std::string::npos : p6 - p[5] - 1));
+                // Determine if it's NSE format (date,open,high,low,close,volume) or generic (timestamp,symbol,open,high,low,close,volume)
+                // NSE has 5 commas. Generic has 6 commas.
+                if (comma_count == 5) {
+                    // NSE Format: date,open,high,low,close,volume
+                    std::string ts_str = line.substr(0, p[0]);
+                    std::string open_str = line.substr(p[0] + 1, p[1] - p[0] - 1);
+                    std::string high_str = line.substr(p[1] + 1, p[2] - p[1] - 1);
+                    std::string low_str = line.substr(p[2] + 1, p[3] - p[2] - 1);
+                    std::string close_str = line.substr(p[3] + 1, p[4] - p[3] - 1);
+                    std::string vol_str = line.substr(p[4] + 1);
 
-                OhlcvRecord r;
-                r.ts_exchange_ns = parse_timestamp_ns(ts_str);
-                r.symbol = sym;
-                r.open = static_cast<int64_t>(std::stod(open_str) * 100000000.0);
-                r.high = static_cast<int64_t>(std::stod(high_str) * 100000000.0);
-                r.low = static_cast<int64_t>(std::stod(low_str) * 100000000.0);
-                r.close = static_cast<int64_t>(std::stod(close_str) * 100000000.0);
-                r.volume = std::stoll(vol_str);
-                records.push_back(r);
+                    OhlcvRecord r;
+                    r.ts_exchange_ns = parse_timestamp_ns(ts_str);
+                    r.symbol = default_symbol;
+                    r.open = static_cast<int64_t>(std::stod(open_str) * 100000000.0);
+                    r.high = static_cast<int64_t>(std::stod(high_str) * 100000000.0);
+                    r.low = static_cast<int64_t>(std::stod(low_str) * 100000000.0);
+                    r.close = static_cast<int64_t>(std::stod(close_str) * 100000000.0);
+                    r.volume = std::stoll(vol_str);
+                    records.push_back(r);
+                } else {
+                    // Generic OHLCV format: timestamp,symbol,open,high,low,close,volume
+                    std::string ts_str = line.substr(0, p[0]);
+                    std::string sym = line.substr(p[0] + 1, p[1] - p[0] - 1);
+                    std::string open_str = line.substr(p[1] + 1, p[2] - p[1] - 1);
+                    std::string high_str = line.substr(p[2] + 1, p[3] - p[2] - 1);
+                    std::string low_str = line.substr(p[3] + 1, p[4] - p[3] - 1);
+                    std::string close_str = line.substr(p[4] + 1, p[5] - p[4] - 1);
+                    size_t p6 = line.find(',', p[5] + 1);
+                    std::string vol_str = line.substr(p[5] + 1, (p6 == std::string::npos ? std::string::npos : p6 - p[5] - 1));
+
+                    OhlcvRecord r;
+                    r.ts_exchange_ns = parse_timestamp_ns(ts_str);
+                    r.symbol = sym;
+                    r.open = static_cast<int64_t>(std::stod(open_str) * 100000000.0);
+                    r.high = static_cast<int64_t>(std::stod(high_str) * 100000000.0);
+                    r.low = static_cast<int64_t>(std::stod(low_str) * 100000000.0);
+                    r.close = static_cast<int64_t>(std::stod(close_str) * 100000000.0);
+                    r.volume = std::stoll(vol_str);
+                    records.push_back(r);
+                }
             }
         } catch (const std::exception& e) {
             std::cerr << "[CsvBackfiller] Warning: Skipping malformed line: " << line << "\n";
@@ -169,13 +207,14 @@ bool CsvBackfiller::backfill_trades_from_csv(const std::string& csv_filepath, co
             else break;
         }
 
-        std::string ts_str, sym, px_str, sz_str;
+        std::string ts_str, sym, px_str, sz_str, is_buyer_maker;
 
         if (comma_count >= 6) {
             // Binance Public Trades format: id, price, qty, quoteQty, time, isBuyerMaker, isBestMatch
             px_str = line.substr(p[0] + 1, p[1] - p[0] - 1);
             sz_str = line.substr(p[1] + 1, p[2] - p[1] - 1);
             ts_str = line.substr(p[3] + 1, p[4] - p[3] - 1);
+            is_buyer_maker = line.substr(p[4] + 1, p[5] - p[4] - 1);
             sym = default_symbol;
         } else if (comma_count >= 3) {
             // Generic format: timestamp, symbol, price, size
@@ -194,9 +233,15 @@ bool CsvBackfiller::backfill_trades_from_csv(const std::string& csv_filepath, co
                 t.ts_exchange_ns *= 1000000ULL; // Binance uses ms, convert to ns
             }
             t.seq_no = seq++;
+            t.symbol_id = SymbolCatalog::instance().get_or_create_id(sym);
             t.price = static_cast<int64_t>(std::stod(px_str) * 100000000.0);
             t.size = static_cast<int64_t>(std::stod(sz_str) * 1000000.0); // often floats in Binance
-            t.side = Side::Bid;
+            
+            if (is_buyer_maker == "True" || is_buyer_maker == "true" || is_buyer_maker == "1") {
+                t.side = Side::Ask; // Buyer is maker -> Taker is Seller -> Sell trade
+            } else {
+                t.side = Side::Bid;
+            }
             trades.push_back(t);
         } catch (const std::exception& e) {
             std::cerr << "[CsvBackfiller] Warning: Skipping malformed Trade line: " << line << "\n";

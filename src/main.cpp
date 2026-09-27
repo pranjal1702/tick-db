@@ -5,6 +5,7 @@
 
 #include "backfill/csv_backfiller.h"
 #include "catalog/database_config.h"
+#include "catalog/symbol_catalog.h"
 
 void print_ingest_usage() {
     std::cout << "Usage: tick_db_ingest --csv <file.csv> --schema <trades|ohlcv> --date <YYYY-MM-DD> --db-path <dir>\n";
@@ -42,6 +43,7 @@ int main(int argc, char** argv) {
     }
 
     tick_db::DatabaseConfig::instance().set_db_root_path(db_path);
+    tick_db::SymbolCatalog::instance().load(db_path);
 
     // Compute target path: db_path/date=YYYY-MM-DD/schema/data.parquet
     // Using DatabaseConfig or manual format to match expectations
@@ -69,6 +71,7 @@ int main(int argc, char** argv) {
     }
 
     if (success) {
+        tick_db::SymbolCatalog::instance().save(db_path);
         std::cout << "[tick_db_ingest] Successfully ingested and created embedded R-Tree Parquet file!\n";
     } else {
         std::cerr << "[tick_db_ingest] Failed to ingest CSV data.\n";

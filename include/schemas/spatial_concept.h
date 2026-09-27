@@ -103,6 +103,8 @@ uint32_t extract_primary_symbol_id(const Record& record) {
                  using FieldType = std::decay_t<decltype(val)>;
                  if constexpr (std::is_same_v<FieldType, std::string>) {
                      if (sym_id == 0) sym_id = SymbolCatalog::instance().get_or_create_id(val);
+                 } else if constexpr (std::is_same_v<FieldType, uint16_t>) {
+                     if (sym_id == 0) sym_id = static_cast<uint32_t>(val);
                  }
              }(args)),
              ...);

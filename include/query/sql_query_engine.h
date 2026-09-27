@@ -18,7 +18,7 @@ struct ParsedSqlQuery {
     std::string table_name;
     std::string symbol;
     uint64_t min_ts{0};
-    uint64_t max_ts{std::numeric_limits<uint64_t>::max()};
+    uint64_t max_ts{static_cast<uint64_t>(std::numeric_limits<int64_t>::max())};
     int64_t min_price{std::numeric_limits<int64_t>::min()};
     int64_t max_price{std::numeric_limits<int64_t>::max()};
     int64_t min_size{std::numeric_limits<int64_t>::min()};
@@ -56,15 +56,53 @@ class SqlQueryEngine {
             }
         }
 
-        // Extract ts_exchange_ns BETWEEN min AND max
+        // Helper to parse human-readable timestamp YYYYMMDD:hh:mm:ss or numeric nanoseconds
+        auto parse_ts_token = [](const std::string& tok) -> uint64_t {
+            if (tok.empty()) return 0;
+            // Check if string contains quotes or colon, e.g. '20230102:09:15:00' or 20230102:09:15:00
+            std::string clean = tok;
+            clean.erase(std::remove(clean.begin(), clean.end(), '\''), clean.end());
+            clean.erase(std::remove(clean.begin(), clean.end(), '"'), clean.end());
+            clean.erase(std::remove(clean.begin(), clean.end(), ';'), clean.end());
+
+            // Format check: YYYYMMDD:hh:mm:ss (length 17)
+            if (clean.size() == 17 && clean[8] == ':' && clean[11] == ':' && clean[14] == ':') {
+                int year = std::stoi(clean.substr(0, 4));
+                int month = std::stoi(clean.substr(4, 2));
+                int day = std::stoi(clean.substr(6, 2));
+                int hour = std::stoi(clean.substr(9, 2));
+                int min = std::stoi(clean.substr(12, 2));
+                int sec = std::stoi(clean.substr(15, 2));
+
+                struct tm t = {};
+                t.tm_year = year - 1900;
+                t.tm_mon = month - 1;
+                t.tm_mday = day;
+                t.tm_hour = hour;
+                t.tm_min = min;
+                t.tm_sec = sec;
+                time_t epoch_sec = timegm(&t);
+                if (epoch_sec != -1) {
+                    return static_cast<uint64_t>(epoch_sec) * 1000000000ULL;
+                }
+            }
+            // Fallback to direct raw integer nanoseconds
+            try {
+                return std::stoull(clean);
+            } catch (...) {
+                return 0;
+            }
+        };
+
+        // Extract BETWEEN min AND max
         size_t between_pos = lower_sql.find("between ");
         if (between_pos != std::string::npos) {
-            std::istringstream ss(sql.substr(between_pos + 8));
-            uint64_t min_v = 0, max_v = 0;
-            std::string and_tok;
-            if (ss >> min_v >> and_tok >> max_v) {
-                q.min_ts = min_v;
-                q.max_ts = max_v;
+            std::string after_between = sql.substr(between_pos + 8);
+            std::istringstream ss(after_between);
+            std::string min_tok, and_tok, max_tok;
+            if (ss >> min_tok >> and_tok >> max_tok) {
+                q.min_ts = parse_ts_token(min_tok);
+                q.max_ts = parse_ts_token(max_tok);
             }
         }
 
@@ -80,6 +118,16 @@ class SqlQueryEngine {
                     else if (sql[op_pos] == '<') q.max_price = p_val;
                     else if (sql[op_pos] == '=') { q.min_price = p_val; q.max_price = p_val; }
                 }
+            }
+        }
+
+        // Extract side = 'BUY' or side = 'SELL'
+        size_t side_pos = lower_sql.find("side");
+        if (side_pos != std::string::npos) {
+            if (lower_sql.find("buy", side_pos) != std::string::npos) {
+                q.side = Side::Bid;
+            } else if (lower_sql.find("sell", side_pos) != std::string::npos) {
+                q.side = Side::Ask;
             }
         }
 
@@ -107,7 +155,7 @@ class SqlQueryEngine {
             query_mbr.max_bounds[2] = parsed.max_price;
         }
 
-        return QueryEngine::execute_symbol_stream<T>(parquet_path, parquet_path, parsed.symbol, query_mbr, out_metrics);
+        return QueryEngine::execute_symbol_stream<T>(parquet_path, parquet_path, parsed.symbol, query_mbr, parsed.side, out_metrics);
     }
 
     template <SpatialRecord T>
