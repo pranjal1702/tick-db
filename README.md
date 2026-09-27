@@ -99,6 +99,8 @@ tick_db> SELECT * FROM trades WHERE symbol = 'AAPL' AND ts_exchange_ns BETWEEN 1
 tick_db> SELECT * FROM ohlcv WHERE symbol = 'NVDA' AND price >= 45000000000
 tick_db> exit
 ```
+
+---
 ![tick-db Sample Query Result](docs/sample_olhcv_query.png)
 
 #### Run a Single SQL Query directly from bash:
