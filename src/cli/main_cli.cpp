@@ -109,11 +109,12 @@ static void execute_cli_sql_stream(const std::vector<std::string>& files, const 
             query_mbr.max_bounds[0] = static_cast<int64_t>(parsed.max_ts);
         }
     }
-    if (dims >= 3 && parsed.min_price != std::numeric_limits<int64_t>::min()) {
-        query_mbr.min_bounds[2] = parsed.min_price;
+    size_t price_dim = std::is_same_v<T, tick_db::OhlcvRecord> ? 5 : 2;
+    if (dims > price_dim && parsed.min_price != std::numeric_limits<int64_t>::min()) {
+        query_mbr.min_bounds[price_dim] = parsed.min_price;
     }
-    if (dims >= 3 && parsed.max_price != std::numeric_limits<int64_t>::max()) {
-        query_mbr.max_bounds[2] = parsed.max_price;
+    if (dims > price_dim && parsed.max_price != std::numeric_limits<int64_t>::max()) {
+        query_mbr.max_bounds[price_dim] = parsed.max_price;
     }
 
     auto stream = tick_db::QueryEngine::execute_multi_day_stream<T>(files, query_mbr, parsed.symbol, parsed.side);

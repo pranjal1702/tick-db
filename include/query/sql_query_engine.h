@@ -106,16 +106,17 @@ class SqlQueryEngine {
             }
         }
 
-        // Extract price >= X or price > X
+        // Extract price >= X or price > X or price < X
         size_t price_pos = lower_sql.find("price");
         if (price_pos != std::string::npos) {
             size_t op_pos = sql.find_first_of("><=", price_pos);
             if (op_pos != std::string::npos) {
                 std::istringstream ss(sql.substr(op_pos + 1));
-                int64_t p_val = 0;
-                if (ss >> p_val) {
-                    if (sql[op_pos] == '>') q.min_price = p_val;
-                    else if (sql[op_pos] == '<') q.max_price = p_val;
+                double raw_price = 0.0;
+                if (ss >> raw_price) {
+                    int64_t p_val = static_cast<int64_t>(raw_price < 10000000.0 ? raw_price * 100000000.0 : raw_price);
+                    if (sql[op_pos] == '>') q.min_price = p_val + (sql.substr(op_pos).rfind(">", 0) == 0 && sql[op_pos+1] != '=' ? 1 : 0);
+                    else if (sql[op_pos] == '<') q.max_price = p_val - (sql[op_pos+1] != '=' ? 1 : 0);
                     else if (sql[op_pos] == '=') { q.min_price = p_val; q.max_price = p_val; }
                 }
             }

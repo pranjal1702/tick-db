@@ -101,7 +101,7 @@ tick_db> exit
 ```
 
 ---
-![tick-db Sample Query Result](docs/sample_olhcv_query.png)
+![tick-db Sample Query Result](docs/sample_image_1.png)
 
 #### Run a Single SQL Query directly from bash:
 ```bash
