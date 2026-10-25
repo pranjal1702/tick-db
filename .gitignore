@@ -1,3 +1,37 @@
+# Build artifacts
 build/
+bin/
+*.o
+*.a
+*.so
+*.dylib
+
+# Data & Parquet files
 *.parquet
+market_data/
 /tmp/
+
+# Python / Backend
+__pycache__/
+*.py[cod]
+*$py.class
+*.venv
+venv/
+ENV/
+.env
+
+# Node / Frontend
+node_modules/
+.npm
+dist/
+.vite/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS / Editor metadata
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

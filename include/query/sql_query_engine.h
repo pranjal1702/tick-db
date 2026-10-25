@@ -168,7 +168,7 @@ class SqlQueryEngine {
 
         DynamicMBR query_mbr;
         size_t dims = record_dimensions_v<T>;
-        query_mbr.min_bounds.assign(dims, 0);
+        query_mbr.min_bounds.assign(dims, std::numeric_limits<int64_t>::min());
         query_mbr.max_bounds.assign(dims, std::numeric_limits<int64_t>::max());
 
         if (dims > 0) {

@@ -40,6 +40,14 @@ class QueryEngine {
     }
 
     template <SpatialRecord T>
+    static RecordStream<T> execute_stream(const std::string& parquet_path, const std::string& sidecar_index_path,
+                                          const GenericMBR& query_mbr, uint32_t target_symbol_id,
+                                          Side target_side = Side::None,
+                                          QueryMetrics* out_metrics = nullptr) {
+        return execute_stream<T>(parquet_path, sidecar_index_path, query_mbr, {}, target_symbol_id, target_side, out_metrics);
+    }
+
+    template <SpatialRecord T>
     static RecordStream<T> execute_symbol_stream(const std::string& parquet_path, const std::string& sidecar_index_path,
                                                  const std::string& symbol, const GenericMBR& query_mbr,
                                                  Side target_side = Side::None,
@@ -78,6 +86,14 @@ class QueryEngine {
     static std::vector<T> execute_query(const std::string& parquet_path, const std::string& sidecar_index_path,
                                         const GenericMBR& query_mbr, QueryMetrics* out_metrics) {
         return execute_query<T>(parquet_path, sidecar_index_path, query_mbr, {}, 0, Side::None, out_metrics);
+    }
+
+    template <SpatialRecord T>
+    static std::vector<T> execute_query(const std::string& parquet_path, const std::string& sidecar_index_path,
+                                        const GenericMBR& query_mbr, uint32_t target_symbol_id,
+                                        Side target_side = Side::None,
+                                        QueryMetrics* out_metrics = nullptr) {
+        return execute_query<T>(parquet_path, sidecar_index_path, query_mbr, {}, target_symbol_id, target_side, out_metrics);
     }
 
     template <SpatialRecord T>

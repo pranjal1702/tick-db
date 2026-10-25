@@ -41,7 +41,7 @@ RecordMBR<Record> extract_mbr(const Record& record) {
                      mbr.min_bounds[idx] = static_cast<int64_t>(val * 100000000.0);
                  } else if constexpr (std::is_same_v<FieldType, std::string>) {
                      uint64_t hash_val = std::hash<std::string>{}(val);
-                     mbr.min_bounds[idx] = static_cast<int64_t>(hash_val);
+                     mbr.min_bounds[idx] = static_cast<int64_t>(hash_val & 0x7FFFFFFFFFFFFFFFULL);
                  }
                  mbr.max_bounds[idx] = mbr.min_bounds[idx];
                  idx++;

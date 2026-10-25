@@ -5,12 +5,35 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <pwd.h>
+#include <unistd.h>
 
 #include "catalog/database_config.h"
 #include "query/sql_query_engine.h"
 #include "schemas/trade.h"
 #include "schemas/ohlcv.h"
 #include "schemas/quote.h"
+
+static std::string expand_path(const std::string& input_path) {
+    if (input_path.empty()) return input_path;
+    std::string path = input_path;
+    if (path.size() >= 2 && ((path.front() == '"' && path.back() == '"') || (path.front() == '\'' && path.back() == '\''))) {
+        path = path.substr(1, path.size() - 2);
+    }
+    if (!path.empty() && path[0] == '~') {
+        const char* home = nullptr;
+        struct passwd* pw = getpwuid(getuid());
+        if (pw && pw->pw_dir) {
+            home = pw->pw_dir;
+        } else {
+            home = std::getenv("HOME");
+        }
+        if (home && home[0] == '/') {
+            return std::string(home) + path.substr(1);
+        }
+    }
+    return path;
+}
 
 static void print_banner() {
     std::cout << "======================================================\n";
@@ -34,7 +57,7 @@ static void print_help() {
 
 static std::vector<std::string> find_schema_files(const std::string& db_path, const tick_db::ParsedSqlQuery& parsed) {
     std::vector<std::string> paths;
-    std::filesystem::path root(db_path);
+    std::filesystem::path root(expand_path(db_path));
     if (!std::filesystem::exists(root)) return paths;
 
     // Convert nanosecond min_ts / max_ts to YYYY-MM-DD date strings if bounded
@@ -114,7 +137,7 @@ static void execute_cli_sql_stream(const std::vector<std::string>& files, const 
     // Build query MBR based on parsed
     tick_db::GenericMBR query_mbr;
     size_t dims = tick_db::record_dimensions_v<T>;
-    query_mbr.min_bounds.assign(dims, 0);
+    query_mbr.min_bounds.assign(dims, std::numeric_limits<int64_t>::min());
     query_mbr.max_bounds.assign(dims, std::numeric_limits<int64_t>::max());
 
     if (dims > 0) {
@@ -170,6 +193,7 @@ static void execute_cli_sql_stream(const std::vector<std::string>& files, const 
 
     if (g_json_stream_mode) {
         // Continuous JSON Lines output for Web API / Web Socket servers
+        size_t out_count = 0;
         while (stream.has_next()) {
             auto rec = stream.next();
             double print_px = 0.0;
@@ -177,22 +201,33 @@ static void execute_cli_sql_stream(const std::vector<std::string>& files, const 
             std::string sym = "";
 
             if constexpr (std::is_same_v<T, tick_db::Trade>) {
-                print_px = static_cast<double>(rec.price) / 100000000.0;
-                size_val = rec.size;
-                sym = tick_db::SymbolCatalog::instance().get_symbol(rec.symbol_id);
+                double print_px = static_cast<double>(rec.price) / 100000000.0;
+                std::string sym = tick_db::SymbolCatalog::instance().get_symbol(rec.symbol_id);
+                std::cout << "{\"timestamp_ns\":" << rec.ts_exchange_ns
+                          << ",\"time\":\"" << format_ts(rec.ts_exchange_ns) << "\""
+                          << ",\"symbol\":\"" << sym << "\""
+                          << ",\"price\":" << std::fixed << std::setprecision(2) << print_px
+                          << ",\"size\":" << rec.size << "}\n";
             } else if constexpr (std::is_same_v<T, tick_db::OhlcvRecord>) {
-                print_px = static_cast<double>(rec.close) / 100000000.0;
-                size_val = rec.volume;
-                sym = rec.symbol;
+                double o = static_cast<double>(rec.open) / 100000000.0;
+                double h = static_cast<double>(rec.high) / 100000000.0;
+                double l = static_cast<double>(rec.low) / 100000000.0;
+                double c = static_cast<double>(rec.close) / 100000000.0;
+                std::cout << "{\"timestamp_ns\":" << rec.ts_exchange_ns
+                          << ",\"time\":\"" << format_ts(rec.ts_exchange_ns) << "\""
+                          << ",\"symbol\":\"" << rec.symbol << "\""
+                          << ",\"open\":" << std::fixed << std::setprecision(2) << o
+                          << ",\"high\":" << std::fixed << std::setprecision(2) << h
+                          << ",\"low\":" << std::fixed << std::setprecision(2) << l
+                          << ",\"close\":" << std::fixed << std::setprecision(2) << c
+                          << ",\"price\":" << std::fixed << std::setprecision(2) << c
+                          << ",\"volume\":" << rec.volume << "}\n";
             }
-
-            std::cout << "{\"timestamp_ns\":" << rec.ts_exchange_ns
-                      << ",\"time\":\"" << format_ts(rec.ts_exchange_ns) << "\""
-                      << ",\"symbol\":\"" << sym << "\""
-                      << ",\"price\":" << std::fixed << std::setprecision(2) << print_px
-                      << ",\"volume\":" << size_val << "}\n";
-            std::cout.flush();
+            if (++out_count % 1024 == 0) {
+                std::cout.flush();
+            }
         }
+        std::cout.flush();
         return;
     }
 
@@ -285,12 +320,19 @@ static void execute_cli_sql(const std::string& sql) {
 
 int main(int argc, char** argv) {
     std::string db_path = "./market_data";
+    // Smart default: if ./market_data doesn't exist, automatically use ~/tickDB if found
+    if (!std::filesystem::exists(db_path)) {
+        std::string fallback_db = expand_path("~/tickDB");
+        if (std::filesystem::exists(fallback_db)) {
+            db_path = fallback_db;
+        }
+    }
     std::string direct_sql;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--db-path" && i + 1 < argc) {
-            db_path = argv[++i];
+            db_path = expand_path(argv[++i]);
         } else if (arg == "--sql" && i + 1 < argc) {
             direct_sql = argv[++i];
         } else if (arg == "--json-stream" || arg == "--stream") {
@@ -328,6 +370,7 @@ int main(int argc, char** argv) {
             std::string new_path = line.substr(7);
             while (!new_path.empty() && std::isspace(new_path.front())) new_path.erase(0, 1);
             if (!new_path.empty()) {
+                new_path = expand_path(new_path);
                 tick_db::DatabaseConfig::instance().set_db_root_path(new_path);
                 std::cout << "Storage Root Directory set to: " << new_path << "\n";
             }
