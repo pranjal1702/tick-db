@@ -61,25 +61,39 @@ class QueryEngine {
     static MultiDayRecordStream<T> execute_multi_day_stream(const std::vector<std::string>& parquet_paths,
                                                             const GenericMBR& query_mbr,
                                                             const std::vector<std::string>& target_symbols = {},
-                                                            Side target_side = Side::None) {
+                                                            Side target_side = Side::None,
+                                                            bool lazy = true) {
         uint32_t sym_id = (target_symbols.size() == 1) ? SymbolCatalog::instance().get_id(target_symbols[0]) : 0;
-        std::vector<RecordStream<T>> day_streams;
-        for (const auto& path : parquet_paths) {
-            auto ds = execute_stream<T>(path, path, query_mbr, target_symbols, sym_id, target_side);
-            if (ds.has_next()) {
-                day_streams.push_back(std::move(ds));
+        
+        if (!lazy) {
+            std::vector<RecordStream<T>> day_streams;
+            for (const auto& path : parquet_paths) {
+                auto ds = execute_stream<T>(path, path, query_mbr, target_symbols, sym_id, target_side);
+                if (ds.has_next()) {
+                    day_streams.push_back(std::move(ds));
+                }
             }
+            return MultiDayRecordStream<T>(std::move(day_streams));
         }
-        return MultiDayRecordStream<T>(std::move(day_streams));
+
+        // Lazy on-demand stream: opens and scans each partition file ONLY when needed!
+        auto generator = [parquet_paths, query_mbr, target_symbols, sym_id, target_side](size_t file_idx) -> RecordStream<T> {
+            if (file_idx >= parquet_paths.size()) return RecordStream<T>{};
+            const auto& path = parquet_paths[file_idx];
+            return execute_stream<T>(path, path, query_mbr, target_symbols, sym_id, target_side);
+        };
+
+        return MultiDayRecordStream<T>(parquet_paths.size(), generator);
     }
 
     // Overload for single symbol string
     template <SpatialRecord T>
-    static MultiDayRecordStream<T> execute_multi_day_stream(const std::vector<std::string>& parquet_paths,
-                                                            const GenericMBR& query_mbr, const std::string& symbol,
-                                                            Side target_side = Side::None) {
+    static MultiDayRecordStream<T> execute_multi_day_symbol_stream(const std::vector<std::string>& parquet_paths,
+                                                                   const GenericMBR& query_mbr, const std::string& symbol,
+                                                                   Side target_side = Side::None,
+                                                                   bool lazy = true) {
         std::vector<std::string> syms = symbol.empty() ? std::vector<std::string>{} : std::vector<std::string>{symbol};
-        return execute_multi_day_stream<T>(parquet_paths, query_mbr, syms, target_side);
+        return execute_multi_day_stream<T>(parquet_paths, query_mbr, syms, target_side, lazy);
     }
 
     template <SpatialRecord T>

@@ -27,5 +27,12 @@ echo "    - API Docs:       http://localhost:8000/docs"
 echo "    - WebSocket:      ws://localhost:8000/ws/stream"
 echo "=========================================================="
 
+PYTHON_BIN="python3"
+if [ -f "$PROJECT_ROOT/.venv/bin/python" ]; then
+    PYTHON_BIN="$PROJECT_ROOT/.venv/bin/python"
+elif [ -f "$PROJECT_ROOT/venv/bin/python" ]; then
+    PYTHON_BIN="$PROJECT_ROOT/venv/bin/python"
+fi
+
 cd "$PROJECT_ROOT"
-python3 -m uvicorn main:app --app-dir "$BACKEND_DIR" --host 0.0.0.0 --port 8000 --reload
+$PYTHON_BIN -m uvicorn main:app --app-dir "$BACKEND_DIR" --host 0.0.0.0 --port 8000 --reload

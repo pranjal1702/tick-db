@@ -309,7 +309,7 @@ void test_multi_day_stream_query() {
                            std::numeric_limits<int64_t>::max(), std::numeric_limits<int64_t>::max(),
                            std::numeric_limits<int64_t>::max()};
 
-    auto multi_stream = tick_db::QueryEngine::execute_multi_day_stream<tick_db::Trade>(day_files, full_mbr);
+    auto multi_stream = tick_db::QueryEngine::execute_multi_day_stream<tick_db::Trade>(day_files, full_mbr, {}, tick_db::Side::None, false);
 
     assert(multi_stream.total_matching() == 300);
 
@@ -322,6 +322,40 @@ void test_multi_day_stream_query() {
         last_ts = trade.ts_exchange_ns;
     }
     assert(count == 300);
+
+    // Test Lazy Mode as well
+    auto lazy_stream = tick_db::QueryEngine::execute_multi_day_stream<tick_db::Trade>(day_files, full_mbr, {}, tick_db::Side::None, true);
+    assert(lazy_stream.is_lazy());
+    assert(lazy_stream.total_files() == 3);
+    size_t lazy_count = 0;
+    last_ts = 0;
+    tick_db::Trade t;
+    while (lazy_stream.next(t)) {
+        lazy_count++;
+        assert(t.ts_exchange_ns > last_ts);
+        last_ts = t.ts_exchange_ns;
+    }
+    assert(lazy_count == 300);
+
+    // Test Lazy Batch Fetching across daily partition boundaries
+    auto batch_stream = tick_db::QueryEngine::execute_multi_day_stream<tick_db::Trade>(day_files, full_mbr, {}, tick_db::Side::None, true);
+    size_t batch_total = 0;
+    while (batch_stream.has_next()) {
+        auto batch = batch_stream.fetch_next_batch(75);
+        assert(!batch.empty());
+        assert(batch.size() <= 75);
+        batch_total += batch.size();
+    }
+    assert(batch_total == 300);
+
+    // Test Range-Based For Loop on MultiDayRecordStream
+    auto for_stream = tick_db::QueryEngine::execute_multi_day_stream<tick_db::Trade>(day_files, full_mbr, {}, tick_db::Side::None, true);
+    size_t for_count = 0;
+    for (const auto& record : for_stream) {
+        (void)record;
+        for_count++;
+    }
+    assert(for_count == 300);
 
     std::cout << "  - Multi-Day Range Querying (300 records across 3 days, strictly time-ascending): PASSED\n";
 }

@@ -8,7 +8,20 @@ from datetime import datetime
 import pyarrow.parquet as pq
 
 CLI_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../build/tick_db_cli"))
-DEFAULT_DB_PATH = os.path.expanduser("~/tickDB")
+
+def get_default_db_path() -> str:
+    env_path = os.environ.get("TICKDB_PATH")
+    if env_path and os.path.exists(os.path.expanduser(env_path)):
+        return os.path.expanduser(env_path)
+    workspace_data = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../market_data"))
+    if os.path.exists(workspace_data):
+        return workspace_data
+    home_tickdb = os.path.expanduser("~/tickDB")
+    if os.path.exists(home_tickdb):
+        return home_tickdb
+    return workspace_data
+
+DEFAULT_DB_PATH = get_default_db_path()
 
 # Packed 56-byte binary packet layout for OHLCV:
 # uint64(ts_ns), 8-byte char(symbol), int64(open), int64(high), int64(low), int64(close), int64(volume)
@@ -16,8 +29,8 @@ BINARY_PACKET_SIZE = 56
 BINARY_FORMAT = "<Q8sqqqqq"
 
 class TickDBClient:
-    def __init__(self, db_path: str = DEFAULT_DB_PATH, cli_path: str = CLI_PATH):
-        self.db_path = os.path.expanduser(db_path)
+    def __init__(self, db_path: Optional[str] = None, cli_path: str = CLI_PATH):
+        self.db_path = os.path.expanduser(db_path) if db_path else get_default_db_path()
         self.cli_path = cli_path
         self._cached_symbols = None
 
@@ -60,26 +73,18 @@ class TickDBClient:
             return ["INFY", "LTTS", "RELIANCE", "TCS", "HDFCBANK", "ICICIBANK"]
 
     @staticmethod
-    def determine_auto_timeframe(start_time: str, end_time: str) -> str:
-        """Pick optimal candlestick timeframe based on date range span."""
-        try:
-            s_date = start_time.split(":")[0]
-            e_date = end_time.split(":")[0]
-            d1 = datetime(int(s_date[:4]), int(s_date[4:6]), int(s_date[6:8]))
-            d2 = datetime(int(e_date[:4]), int(e_date[4:6]), int(e_date[6:8]))
-            days = abs((d2 - d1).days)
-            if days <= 3:
-                return "1m"
-            elif days <= 14:
-                return "5m"
-            elif days <= 60:
-                return "15m"
-            elif days <= 180:
-                return "1h"
-            else:
-                return "1d"
-        except Exception:
+    def determine_auto_timeframe(raw_count: int) -> str:
+        """Pick optimal candlestick timeframe based on actual bar count to maintain 200-800 candles on chart."""
+        if raw_count <= 600:
             return "1m"
+        elif raw_count <= 2500:
+            return "5m"
+        elif raw_count <= 7500:
+            return "15m"
+        elif raw_count <= 25000:
+            return "1h"
+        else:
+            return "1d"
 
     async def query_ohlcv(
         self,
@@ -90,15 +95,21 @@ class TickDBClient:
         timeframe: str = "auto"
     ) -> List[Dict[str, Any]]:
         """Fetch OHLCV candles as a list of dicts, optionally resampled."""
+        raw_bars = []
+        async for item in self.stream_ohlcv_json([symbol], start_time, end_time, price_filter):
+            raw_bars.append(item)
+
+        if not raw_bars:
+            return []
+
         resolved_tf = timeframe
         if timeframe == "auto":
-            resolved_tf = self.determine_auto_timeframe(start_time, end_time)
+            resolved_tf = self.determine_auto_timeframe(len(raw_bars))
 
-        records = []
         if resolved_tf == "1m":
-            async for item in self.stream_ohlcv_json([symbol], start_time, end_time, price_filter):
-                records.append(item)
-            return records
+            for b in raw_bars:
+                b["timeframe"] = "1m"
+            return raw_bars
 
         def get_bucket_key(ts_ns: int, time_str: str) -> str:
             if resolved_tf == "1d":
@@ -111,10 +122,11 @@ class TickDBClient:
                 return str(ts_ns // (300 * 1_000_000_000))
             return str(ts_ns)
 
+        records = []
         current_bucket_key = None
         current_candle = None
 
-        async for bar in self.stream_ohlcv_json([symbol], start_time, end_time, price_filter):
+        for bar in raw_bars:
             b_key = get_bucket_key(bar.get("timestamp_ns", 0), bar.get("time", ""))
             if b_key != current_bucket_key:
                 if current_candle is not None:

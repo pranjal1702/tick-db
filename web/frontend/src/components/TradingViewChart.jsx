@@ -92,12 +92,22 @@ export default function TradingViewChart({
       wickDownColor: '#ef4444'
     });
 
-    // Volume Histogram (overlayed at bottom)
+    candleSeries.priceScale().applyOptions({
+      scaleMargins: {
+        top: 0.1,    // 10% margin at top
+        bottom: 0.25 // 25% margin at bottom so candles never overlap volume
+      }
+    });
+
+    // Volume Histogram (overlayed cleanly at bottom)
     const volumeSeries = chart.addHistogramSeries({
       priceFormat: { type: 'volume' },
-      priceScaleId: '', // Separate scale
+      priceScaleId: '', // Separate overlay scale
+    });
+
+    volumeSeries.priceScale().applyOptions({
       scaleMargins: {
-        top: 0.8,
+        top: 0.8, // Push volume bars down so they only occupy bottom 20%
         bottom: 0
       }
     });

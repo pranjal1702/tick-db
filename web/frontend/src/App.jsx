@@ -128,10 +128,10 @@ export default function App() {
       e = '20230103:15:30:00';
     } else if (preset === 'multiday') {
       s = '20230102:09:15:00';
-      e = '20230105:15:30:00';
-    } else if (preset === '2years') {
+      e = '20230106:15:30:00';
+    } else if (preset === 'month' || preset === '2years') {
       s = '20230102:09:15:00';
-      e = '20250130:15:30:00';
+      e = '20230127:15:30:00';
     }
     setInputStartTime(s);
     setInputEndTime(e);
@@ -354,13 +354,13 @@ export default function App() {
               onClick={() => setDatePreset('multiday')}
               className="px-2.5 py-1 rounded bg-blue-600/20 border border-blue-500/30 text-[11px] text-blue-400 font-medium hover:bg-blue-600/30 transition"
             >
-              Jan 02-05 (4D)
+              Jan 02-06 (1W)
             </button>
             <button
-              onClick={() => setDatePreset('2years')}
+              onClick={() => setDatePreset('month')}
               className="px-2.5 py-1 rounded bg-indigo-600/20 border border-indigo-500/30 text-[11px] text-indigo-400 font-medium hover:bg-indigo-600/30 transition"
             >
-              2023-2025 (2Y)
+              Jan 02-27 (4W)
             </button>
           </div>
         </div>
