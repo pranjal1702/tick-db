@@ -35,7 +35,7 @@ bool ParquetWriter::write_table(const std::string& filepath, const std::shared_p
 
 bool ParquetWriter::write_table_with_metadata(const std::string& filepath, const std::shared_ptr<arrow::Table>& table,
                                          const std::shared_ptr<arrow::KeyValueMetadata>& kv_metadata,
-                                         int64_t records_per_page) {
+                                         int64_t records_per_page, int64_t chunk_size) {
     if (!table || table->num_rows() == 0) {
         std::cerr << "[ParquetWriter] Cannot write null or empty table to " << filepath << "\n";
         return false;
@@ -63,7 +63,7 @@ bool ParquetWriter::write_table_with_metadata(const std::string& filepath, const
     auto arrow_props = parquet::ArrowWriterProperties::Builder().store_schema()->build();
 
     auto status =
-        parquet::arrow::WriteTable(*write_tbl, arrow::default_memory_pool(), outfile, 65536, writer_props, arrow_props);
+        parquet::arrow::WriteTable(*write_tbl, arrow::default_memory_pool(), outfile, chunk_size, writer_props, arrow_props);
     if (!status.ok()) {
         std::cerr << "[ParquetWriter] WriteTable failed: " << status.ToString() << "\n";
         return false;

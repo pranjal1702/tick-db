@@ -27,9 +27,9 @@ class ParquetWriter {
     template <typename T>
     static bool write_records_with_metadata(const std::string& filepath, std::span<const T> records,
                                             const std::shared_ptr<arrow::KeyValueMetadata>& kv_metadata,
-                                            int64_t records_per_page = 256) {
+                                            int64_t records_per_page = 256, int64_t chunk_size = 65536) {
         auto table = to_columns(records);
-        return write_table_with_metadata(filepath, table, kv_metadata, records_per_page);
+        return write_table_with_metadata(filepath, table, kv_metadata, records_per_page, chunk_size);
     }
 
     // Write trades to a time-ordered Parquet file
@@ -42,7 +42,7 @@ class ParquetWriter {
 
     static bool write_table_with_metadata(const std::string& filepath, const std::shared_ptr<arrow::Table>& table,
                                          const std::shared_ptr<arrow::KeyValueMetadata>& kv_metadata,
-                                         int64_t records_per_page = 256);
+                                         int64_t records_per_page = 256, int64_t chunk_size = 65536);
 };
 
 }  // namespace tick_db

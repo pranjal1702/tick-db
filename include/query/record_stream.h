@@ -10,16 +10,39 @@
 
 namespace tick_db {
 
-template <SpatialRecord T>
+template <typename T>
 class RecordStream {
    public:
+    using BatchSupplier = std::function<bool(std::vector<T>& out_batch)>;
+
     RecordStream() = default;
 
     explicit RecordStream(std::vector<T> records)
-        : records_(std::move(records)), current_idx_(0) {}
+        : records_(std::move(records)), current_idx_(0), is_lazy_(false) {
+        total_count_ = records_.size();
+    }
+
+    // Lazy Batch Constructor: fetches records micro-batch by micro-batch from storage
+    RecordStream(size_t estimated_total, BatchSupplier supplier)
+        : current_idx_(0), is_lazy_(true), total_count_(estimated_total), supplier_(std::move(supplier)) {}
 
     bool has_next() const {
-        return current_idx_ < records_.size();
+        if (!is_lazy_) {
+            return current_idx_ < records_.size();
+        }
+        if (current_idx_ < records_.size()) {
+            return true;
+        }
+        // Pull next batch from supplier
+        records_.clear();
+        current_idx_ = 0;
+        if (!supplier_) return false;
+        while (supplier_(records_)) {
+            if (!records_.empty()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     T next() {
@@ -40,21 +63,25 @@ class RecordStream {
     std::vector<T> fetch_next_batch(size_t batch_size = 4096) {
         std::vector<T> batch;
         if (!has_next()) return batch;
-        size_t count = std::min(batch_size, records_.size() - current_idx_);
-        batch.reserve(count);
-        for (size_t i = 0; i < count; ++i) {
+        batch.reserve(batch_size);
+        while (batch.size() < batch_size && has_next()) {
             batch.push_back(records_[current_idx_++]);
         }
         return batch;
     }
 
     size_t total_matching() const {
-        return records_.size();
+        return total_count_;
     }
 
     size_t remaining() const {
-        return (current_idx_ < records_.size()) ? (records_.size() - current_idx_) : 0;
+        if (!is_lazy_) {
+            return (current_idx_ < records_.size()) ? (records_.size() - current_idx_) : 0;
+        }
+        return (current_idx_ < records_.size()) ? (records_.size() - current_idx_) : (total_count_ > 0 ? 1 : 0);
     }
+
+    bool is_lazy() const { return is_lazy_; }
 
     // Standard C++ Input Iterator for Range-Based For Loops
     class Iterator {
@@ -65,29 +92,35 @@ class RecordStream {
         using pointer = const T*;
         using reference = const T&;
 
-        Iterator(const RecordStream* stream, size_t pos) : stream_(stream), pos_(pos) {}
+        Iterator(RecordStream* stream, bool is_end)
+            : stream_(stream), is_end_(is_end) {
+            if (!is_end_ && stream_) {
+                advance();
+            }
+        }
 
         reference operator*() const {
-            return stream_->records_[pos_];
+            return current_val_;
         }
 
         pointer operator->() const {
-            return &stream_->records_[pos_];
+            return &current_val_;
         }
 
         Iterator& operator++() {
-            ++pos_;
+            advance();
             return *this;
         }
 
         Iterator operator++(int) {
             Iterator tmp = *this;
-            ++(*this);
+            advance();
             return tmp;
         }
 
         bool operator==(const Iterator& other) const {
-            return stream_ == other.stream_ && pos_ == other.pos_;
+            if (is_end_ && other.is_end_) return true;
+            return is_end_ == other.is_end_ && stream_ == other.stream_;
         }
 
         bool operator!=(const Iterator& other) const {
@@ -95,24 +128,44 @@ class RecordStream {
         }
 
        private:
-        const RecordStream* stream_{nullptr};
-        size_t pos_{0};
+        void advance() {
+            if (stream_ && stream_->has_next()) {
+                current_val_ = stream_->next();
+            } else {
+                is_end_ = true;
+            }
+        }
+
+        RecordStream* stream_{nullptr};
+        bool is_end_{true};
+        T current_val_{};
     };
 
+    Iterator begin() {
+        return Iterator(this, false);
+    }
+
+    Iterator end() {
+        return Iterator(this, true);
+    }
+
     Iterator begin() const {
-        return Iterator(this, current_idx_);
+        return Iterator(const_cast<RecordStream*>(this), false);
     }
 
     Iterator end() const {
-        return Iterator(this, records_.size());
+        return Iterator(const_cast<RecordStream*>(this), true);
     }
 
    private:
-    std::vector<T> records_;
-    size_t current_idx_{0};
+    mutable std::vector<T> records_;
+    mutable size_t current_idx_{0};
+    bool is_lazy_{false};
+    size_t total_count_{0};
+    mutable BatchSupplier supplier_{nullptr};
 };
 
-template <SpatialRecord T>
+template <typename T>
 class MultiDayRecordStream {
    public:
     using StreamGenerator = std::function<RecordStream<T>(size_t file_idx)>;

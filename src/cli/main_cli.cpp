@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include "catalog/database_config.h"
+#include "catalog/partition_catalog.h"
 #include "query/sql_query_engine.h"
 #include "schemas/trade.h"
 #include "schemas/ohlcv.h"
@@ -56,11 +57,6 @@ static void print_help() {
 }
 
 static std::vector<std::string> find_schema_files(const std::string& db_path, const tick_db::ParsedSqlQuery& parsed) {
-    std::vector<std::string> paths;
-    std::filesystem::path root(expand_path(db_path));
-    if (!std::filesystem::exists(root)) return paths;
-
-    // Convert nanosecond min_ts / max_ts to YYYY-MM-DD date strings if bounded
     std::string start_date_str = "";
     std::string end_date_str = "";
 
@@ -84,33 +80,7 @@ static std::vector<std::string> find_schema_files(const std::string& db_path, co
         }
     }
 
-    // Search for data.parquet files that match schema and fall within date bounds
-    for (auto it = std::filesystem::recursive_directory_iterator(root);
-         it != std::filesystem::recursive_directory_iterator(); ++it) {
-        if (it->is_regular_file() && it->path().filename() == "data.parquet") {
-            std::string full_path = it->path().string();
-            if (full_path.find("/" + parsed.table_name + "/") != std::string::npos ||
-                full_path.find("\\" + parsed.table_name + "\\") != std::string::npos) {
-                
-                // Extract date=YYYY-MM-DD from path
-                size_t date_pos = full_path.find("date=");
-                if (date_pos != std::string::npos) {
-                    std::string folder_date = full_path.substr(date_pos + 5, 10);
-                    if (!start_date_str.empty() && folder_date < start_date_str) {
-                        continue; // Prune partition!
-                    }
-                    if (!end_date_str.empty() && folder_date > end_date_str) {
-                        continue; // Prune partition!
-                    }
-                }
-                paths.push_back(full_path);
-            }
-        }
-    }
-    
-    // Sort paths to keep time-ascending order
-    std::sort(paths.begin(), paths.end());
-    return paths;
+    return tick_db::PartitionCatalog::instance().find_files(expand_path(db_path), parsed.table_name, start_date_str, end_date_str);
 }
 
 static bool g_json_stream_mode = false;
@@ -157,8 +127,6 @@ static void execute_cli_sql_stream(const std::vector<std::string>& files, const 
     }
 
     auto stream = tick_db::QueryEngine::execute_multi_day_stream<T>(files, query_mbr, parsed.symbols, parsed.side);
-    auto end_time = std::chrono::high_resolution_clock::now();
-    double elapsed_us = std::chrono::duration<double, std::micro>(end_time - start_time).count();
 
     if (g_binary_stream_mode) {
         // High-Speed Binary Streaming (Packed 56-Byte Records for WebSockets / WebAssembly)
@@ -277,6 +245,9 @@ static void execute_cli_sql_stream(const std::vector<std::string>& files, const 
         std::cout << "... (" << (total_matching - 20) << " more rows matching in stream)\n";
     }
 
+    auto end_time = std::chrono::high_resolution_clock::now();
+    double elapsed_us = std::chrono::duration<double, std::micro>(end_time - start_time).count();
+
     std::cout << "\n------------------------------------------------------\n";
     std::cout << " Query Performance Metrics:\n";
     std::cout << "------------------------------------------------------\n";
@@ -331,14 +302,16 @@ int main(int argc, char** argv) {
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
-        if (arg == "--db-path" && i + 1 < argc) {
+        if ((arg == "--db-path" || arg == "--dbpath") && i + 1 < argc) {
             db_path = expand_path(argv[++i]);
-        } else if (arg == "--sql" && i + 1 < argc) {
+        } else if ((arg == "--sql" || arg == "-e") && i + 1 < argc) {
             direct_sql = argv[++i];
         } else if (arg == "--json-stream" || arg == "--stream") {
             g_json_stream_mode = true;
         } else if (arg == "--binary-stream" || arg == "--bin-stream") {
             g_binary_stream_mode = true;
+        } else if (arg[0] != '-' && direct_sql.empty()) {
+            direct_sql = arg;
         }
     }
 

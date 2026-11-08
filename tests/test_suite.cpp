@@ -434,6 +434,62 @@ void test_csv_backfiller() {
     std::cout << "  - CSV Backfilling & Parquet Embedded Index Generation (3 bars ingested): PASSED\n";
 }
 
+void test_streaming_kway_merge_and_multi_schema_replay() {
+    std::cout << "\n[TEST ND-11] Testing Deterministic Multi-Schema Streaming K-Way Merge...\n";
+
+    // 1. Create Trade stream
+    std::vector<tick_db::Trade> trades = {
+        {1000000, 1, 1, 15000, 100, tick_db::Side::Bid},
+        {1000020, 3, 1, 15010, 200, tick_db::Side::Ask},
+        {1000050, 5, 1, 15020, 300, tick_db::Side::Bid}
+    };
+    tick_db::RecordStream<tick_db::Trade> trade_stream(trades);
+
+    // 2. Create Quote stream
+    std::vector<tick_db::Quote> quotes = {
+        {1000010, 2, 14990, 500, 15010, 500},
+        {1000030, 4, 15000, 600, 15020, 400}
+    };
+    tick_db::RecordStream<tick_db::Quote> quote_stream(quotes);
+
+    // 3. Create OrderEvent stream
+    std::vector<tick_db::OrderEvent> orders = {
+        {1000000, 0, 999111, tick_db::OrderEventType::Add, tick_db::Side::Bid, 14990, 500},
+        {1000060, 6, 999222, tick_db::OrderEventType::Add, tick_db::Side::Ask, 15020, 300}
+    };
+    tick_db::RecordStream<tick_db::OrderEvent> order_stream(orders);
+
+    // Wrap into unified variant streams
+    auto v_trades = tick_db::MultiSchemaReplayer::wrap_stream(trade_stream);
+    auto v_quotes = tick_db::MultiSchemaReplayer::wrap_stream(quote_stream);
+    auto v_orders = tick_db::MultiSchemaReplayer::wrap_stream(order_stream);
+
+    std::vector<tick_db::RecordStream<tick_db::MarketRecordVariant>> streams;
+    streams.push_back(std::move(v_trades));
+    streams.push_back(std::move(v_quotes));
+    streams.push_back(std::move(v_orders));
+
+    auto merged_stream = tick_db::MultiSchemaReplayer::merge_variants(std::move(streams));
+
+    size_t count = 0;
+    uint64_t last_ts = 0;
+    uint64_t last_seq = 0;
+
+    while (merged_stream.has_next()) {
+        auto var = merged_stream.next();
+        count++;
+        auto [ts, seq] = tick_db::get_event_key(var);
+        if (count > 1) {
+            assert(ts > last_ts || (ts == last_ts && seq >= last_seq));
+        }
+        last_ts = ts;
+        last_seq = seq;
+    }
+
+    assert(count == 7);
+    std::cout << "  - Deterministic Multi-Schema Replay (Trades+Quotes+OrderEvents, 7 items strictly ordered): PASSED\n";
+}
+
 int main() {
     std::cout << "=======================================================\n";
     std::cout << " Running Generic N-Dimensional R-Tree Architecture Tests\n";
@@ -449,6 +505,7 @@ int main() {
     test_multi_day_stream_query();
     test_sql_query_engine();
     test_csv_backfiller();
+    test_streaming_kway_merge_and_multi_schema_replay();
 
     std::cout << "\n=======================================================\n";
     std::cout << " ALL GENERIC N-DIMENSIONAL R-TREE TESTS PASSED! \n";

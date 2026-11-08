@@ -113,6 +113,19 @@ std::string SidecarIndex::serialize_to_string(const HierarchicalRTree& rtree) {
     return out.str();
 }
 
+bool SidecarIndex::read_index(parquet::arrow::FileReader* reader, const std::string& index_path, HierarchicalRTree& out_rtree) {
+    // 1. Try reading embedded index directly from open FileReader
+    if (reader) {
+        std::string embedded = ParquetReader::read_embedded_index(*reader);
+        if (!embedded.empty()) {
+            return deserialize_from_string(embedded, out_rtree);
+        }
+    }
+
+    // 2. Try reading embedded index or external .index sidecar file from path
+    return read_index(index_path, out_rtree);
+}
+
 bool SidecarIndex::read_index(const std::string& index_path, HierarchicalRTree& out_rtree) {
     // 1. Try reading embedded index from Parquet KeyValueMetadata ("tick_db.index.v1")
     std::string embedded = ParquetReader::read_embedded_index(index_path);

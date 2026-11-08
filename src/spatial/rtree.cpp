@@ -17,26 +17,31 @@ void HierarchicalRTree::insert(const RTreeEntry& entry) {
     insert_node(root_, entry_copy);
 }
 
-std::vector<RTreeEntry> HierarchicalRTree::search(const GenericMBR& query_mbr) const {
+std::vector<RTreeEntry> HierarchicalRTree::search(const GenericMBR& query_mbr, uint32_t target_symbol_id) const {
     std::vector<RTreeEntry> results;
     if (root_) {
-        search_node(root_, query_mbr, results);
+        search_node(root_, query_mbr, target_symbol_id, results);
     }
     return results;
 }
 
-std::vector<PageMBR> HierarchicalRTree::search_pages(const GenericMBR& query_mbr) const {
+std::vector<PageMBR> HierarchicalRTree::search_pages(const GenericMBR& query_mbr, uint32_t target_symbol_id) const {
     std::vector<PageMBR> page_results;
-    auto rgs = search(query_mbr);
+    auto rgs = search(query_mbr, target_symbol_id);
 
     for (const auto& rg : rgs) {
         if (rg.page_rtree) {
-            auto pmatches = rg.page_rtree->search(query_mbr);
+            auto pmatches = rg.page_rtree->search(query_mbr, target_symbol_id);
             for (const auto& pm : pmatches) {
                 page_results.push_back({pm.row_group_id, pm.mbr, 0});
             }
         } else {
             for (const auto& pm : rg.page_mbrs) {
+                if (target_symbol_id > 0 && pm.symbol_bitmask != 0) {
+                    if ((pm.symbol_bitmask & (1ULL << (target_symbol_id % 64))) == 0) {
+                        continue; // Pruned Level-2 page!
+                    }
+                }
                 if (pm.mbr.intersects(query_mbr)) {
                     page_results.push_back(pm);
                 }
@@ -48,26 +53,41 @@ std::vector<PageMBR> HierarchicalRTree::search_pages(const GenericMBR& query_mbr
 }
 
 void HierarchicalRTree::search_node(const std::shared_ptr<RTreeNode>& node, const GenericMBR& query_mbr,
-                                    std::vector<RTreeEntry>& results) const {
+                                    uint32_t target_symbol_id, std::vector<RTreeEntry>& results) const {
     if (!node || !node->mbr.intersects(query_mbr)) {
         return;  // Subtree pruned on N-dimensions!
     }
 
+    // Prune entire subtree on symbol bitmask
+    if (target_symbol_id > 0 && node->symbol_bitmask != 0) {
+        uint64_t target_mask = (1ULL << (target_symbol_id % 64));
+        if ((node->symbol_bitmask & target_mask) == 0) {
+            return; // Subtree pruned via symbol bitmask!
+        }
+    }
+
     if (node->is_leaf) {
         for (const auto& entry : node->entries) {
+            if (target_symbol_id > 0 && entry.symbol_bitmask != 0) {
+                uint64_t target_mask = (1ULL << (target_symbol_id % 64));
+                if ((entry.symbol_bitmask & target_mask) == 0) {
+                    continue; // Skip entry pruned via symbol bitmask!
+                }
+            }
             if (entry.mbr.intersects(query_mbr)) {
                 results.push_back(entry);
             }
         }
     } else {
         for (const auto& child : node->children) {
-            search_node(child, query_mbr, results);
+            search_node(child, query_mbr, target_symbol_id, results);
         }
     }
 }
 
 void HierarchicalRTree::insert_node(std::shared_ptr<RTreeNode>& node, const RTreeEntry& entry) {
     node->mbr.expand(entry.mbr);
+    node->symbol_bitmask |= entry.symbol_bitmask;
 
     if (node->is_leaf) {
         node->entries.push_back(entry);
@@ -106,14 +126,17 @@ void HierarchicalRTree::split_node(std::shared_ptr<RTreeNode>& node) {
     for (size_t i = 0; i < mid; ++i) {
         child1->entries.push_back(node->entries[i]);
         child1->mbr.expand(node->entries[i].mbr);
+        child1->symbol_bitmask |= node->entries[i].symbol_bitmask;
     }
     for (size_t i = mid; i < node->entries.size(); ++i) {
         child2->entries.push_back(node->entries[i]);
         child2->mbr.expand(node->entries[i].mbr);
+        child2->symbol_bitmask |= node->entries[i].symbol_bitmask;
     }
 
     node->entries.clear();
     node->is_leaf = false;
+    node->symbol_bitmask = child1->symbol_bitmask | child2->symbol_bitmask;
     node->children.push_back(child1);
     node->children.push_back(child2);
 }

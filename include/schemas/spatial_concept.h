@@ -65,24 +65,30 @@ RecordMBR<Record> extract_mbr(std::span<const Record> records) {
 
 template <SpatialRecord Record>
 uint64_t extract_symbol_bitmask(const Record& record) {
-    uint64_t mask = 0;
+    uint32_t sym_id = 0;
+    bool found = false;
     std::apply(
         [&](auto&&... args) {
             (([&](auto&& val) {
                  using FieldType = std::decay_t<decltype(val)>;
-                 if constexpr (std::is_integral_v<FieldType>) {
-                     uint64_t bit_pos = static_cast<uint64_t>(val) % 64;
-                     mask |= (1ULL << bit_pos);
-                 } else if constexpr (std::is_same_v<FieldType, std::string>) {
-                     uint64_t hash_val = std::hash<std::string>{}(val);
-                     uint64_t bit_pos = hash_val % 64;
-                     mask |= (1ULL << bit_pos);
+                 if constexpr (std::is_same_v<FieldType, std::string>) {
+                     if (!found) {
+                         sym_id = SymbolCatalog::instance().get_or_create_id(val);
+                         found = true;
+                     }
+                 } else if constexpr (std::is_same_v<FieldType, uint16_t>) {
+                     if (!found) {
+                         sym_id = static_cast<uint32_t>(val);
+                         found = true;
+                     }
                  }
              }(args)),
              ...);
         },
         record.spatial_tuple());
-    return mask;
+
+    if (!found) return 0ULL;
+    return (1ULL << (sym_id % 64));
 }
 
 template <SpatialRecord Record>
@@ -97,14 +103,21 @@ uint64_t extract_symbol_bitmask(std::span<const Record> records) {
 template <SpatialRecord Record>
 uint32_t extract_primary_symbol_id(const Record& record) {
     uint32_t sym_id = 0;
+    bool found = false;
     std::apply(
         [&](auto&&... args) {
             (([&](auto&& val) {
                  using FieldType = std::decay_t<decltype(val)>;
                  if constexpr (std::is_same_v<FieldType, std::string>) {
-                     if (sym_id == 0) sym_id = SymbolCatalog::instance().get_or_create_id(val);
+                     if (!found) {
+                         sym_id = SymbolCatalog::instance().get_or_create_id(val);
+                         found = true;
+                     }
                  } else if constexpr (std::is_same_v<FieldType, uint16_t>) {
-                     if (sym_id == 0) sym_id = static_cast<uint32_t>(val);
+                     if (!found) {
+                         sym_id = static_cast<uint32_t>(val);
+                         found = true;
+                     }
                  }
              }(args)),
              ...);

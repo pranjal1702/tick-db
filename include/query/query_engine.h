@@ -35,8 +35,170 @@ class QueryEngine {
                                           const GenericMBR& query_mbr, const std::vector<std::string>& target_symbols = {},
                                           uint32_t target_symbol_id = 0, Side target_side = Side::None,
                                           QueryMetrics* out_metrics = nullptr) {
-        auto records = execute_query<T>(parquet_path, sidecar_index_path, query_mbr, target_symbols, target_symbol_id, target_side, out_metrics);
-        return RecordStream<T>(std::move(records));
+        if (target_symbol_id == 0 && target_symbols.size() == 1) {
+            target_symbol_id = SymbolCatalog::instance().get_id(target_symbols[0]);
+        }
+
+        // Single-I/O open handle: opens file once and keeps handle open for embedded metadata and streaming
+        auto reader = ParquetReader::open_file(parquet_path);
+        if (!reader) {
+            return RecordStream<T>{};
+        }
+
+        HierarchicalRTree rtree;
+        bool has_index = SidecarIndex::read_index(reader.get(), sidecar_index_path, rtree);
+
+        std::vector<RTreeEntry> candidate_rgs;
+        std::vector<PageMBR> candidate_pages;
+        size_t total_rgs_in_file = reader->parquet_reader()->metadata()->num_row_groups();
+
+        if (has_index) {
+            candidate_rgs = rtree.search(query_mbr, target_symbol_id);
+            candidate_pages = rtree.search_pages(query_mbr, target_symbol_id);
+
+            if (candidate_rgs.empty() && rtree.total_leaf_entries() > 0) {
+                if (out_metrics) {
+                    out_metrics->files_considered = 1;
+                    out_metrics->files_pruned = 1;
+                    out_metrics->row_groups_considered = rtree.total_leaf_entries();
+                    out_metrics->row_groups_selected = 0;
+                }
+                return RecordStream<T>{};  // File pruned via N-Dimensional R-Tree + Symbol Bitmask!
+            }
+        }
+
+        std::vector<int> rg_indices;
+        if (has_index) {
+            rg_indices.reserve(candidate_rgs.size());
+            for (const auto& rg : candidate_rgs) {
+                rg_indices.push_back(rg.row_group_id);
+            }
+        } else {
+            rg_indices.resize(total_rgs_in_file);
+            for (size_t i = 0; i < total_rgs_in_file; ++i) rg_indices[i] = static_cast<int>(i);
+        }
+
+        std::vector<SymbolRange> compact_ranges;
+        if (has_index && target_symbol_id > 0) {
+            compact_ranges = rtree.symbol_directory().get_compact_symbol_ranges(target_symbol_id, 4);
+        }
+
+        struct StreamState {
+            size_t rg_pos{0};
+            size_t records_examined{0};
+            size_t records_returned{0};
+        };
+        auto state = std::make_shared<StreamState>();
+
+        auto check_symbol = [target_symbols, target_symbol_id](const T& rec) -> bool {
+            if (!target_symbols.empty()) {
+                if constexpr (requires { rec.symbol; }) {
+                    return std::find(target_symbols.begin(), target_symbols.end(), rec.symbol) != target_symbols.end();
+                }
+            }
+            if (target_symbol_id > 0) {
+                if constexpr (requires { rec.symbol_id; }) {
+                    return rec.symbol_id == target_symbol_id;
+                }
+            }
+            return true;
+        };
+
+        auto check_side = [target_side](const T& rec) -> bool {
+            if (target_side == Side::None) return true;
+            if constexpr (requires { rec.side; }) {
+                return rec.side == target_side;
+            }
+            return true;
+        };
+
+        auto supplier = [reader, rg_indices, compact_ranges, query_mbr, check_symbol, check_side, state, out_metrics](std::vector<T>& out_batch) -> bool {
+            out_batch.clear();
+            while (state->rg_pos < rg_indices.size()) {
+                int rg_id = rg_indices[state->rg_pos++];
+                auto records = ParquetReader::read_records<T>(*reader, {rg_id});
+                if (records.empty()) continue;
+
+                // Check for sub-row-group symbol ranges for this row group
+                std::vector<SymbolRange> rg_ranges;
+                for (const auto& sr : compact_ranges) {
+                    if (sr.row_group_id == static_cast<uint32_t>(rg_id)) {
+                        rg_ranges.push_back(sr);
+                    }
+                }
+
+                if (!rg_ranges.empty()) {
+                    for (const auto& sr : rg_ranges) {
+                        size_t end_idx = std::min<size_t>(sr.start_row + sr.count, records.size());
+                        for (size_t i = sr.start_row; i < end_idx; ++i) {
+                            state->records_examined++;
+                            const auto& rec = records[i];
+                            if (!check_symbol(rec)) continue;
+                            if (!check_side(rec)) continue;
+                            auto rec_mbr = extract_mbr(rec);
+                            if (rec_mbr.intersects(query_mbr)) {
+                                out_batch.push_back(rec);
+                                state->records_returned++;
+                            }
+                        }
+                    }
+                } else {
+                    for (const auto& rec : records) {
+                        state->records_examined++;
+                        if (!check_symbol(rec)) continue;
+                        if (!check_side(rec)) continue;
+                        auto rec_mbr = extract_mbr(rec);
+                        if (rec_mbr.intersects(query_mbr)) {
+                            out_batch.push_back(rec);
+                            state->records_returned++;
+                        }
+                    }
+                }
+
+                if (!out_batch.empty()) {
+                    if (out_metrics) {
+                        out_metrics->records_examined = state->records_examined;
+                        out_metrics->records_returned = state->records_returned;
+                    }
+                    return true;
+                }
+            }
+            if (out_metrics) {
+                out_metrics->records_examined = state->records_examined;
+                out_metrics->records_returned = state->records_returned;
+            }
+            return false;
+        };
+
+        if (out_metrics) {
+            out_metrics->files_considered = 1;
+            out_metrics->files_pruned = 0;
+            out_metrics->row_groups_considered = has_index ? rtree.total_leaf_entries() : total_rgs_in_file;
+            out_metrics->row_groups_selected = rg_indices.size();
+            out_metrics->pages_considered = total_rgs_in_file;
+            out_metrics->pages_read = candidate_pages.empty() ? rg_indices.size() : candidate_pages.size();
+            if (out_metrics->pages_considered > 0) {
+                out_metrics->page_pruning_ratio =
+                    1.0 - (static_cast<double>(out_metrics->pages_read) / static_cast<double>(out_metrics->pages_considered));
+                if (out_metrics->page_pruning_ratio < 0.0) out_metrics->page_pruning_ratio = 0.0;
+            }
+        }
+
+        size_t total_matching_count = 0;
+        if (!compact_ranges.empty()) {
+            for (const auto& sr : compact_ranges) {
+                total_matching_count += sr.count;
+            }
+        } else {
+            auto meta = reader->parquet_reader()->metadata();
+            for (int rg : rg_indices) {
+                if (rg < meta->num_row_groups()) {
+                    total_matching_count += meta->RowGroup(rg)->num_rows();
+                }
+            }
+        }
+
+        return RecordStream<T>(total_matching_count, supplier);
     }
 
     template <SpatialRecord T>
@@ -115,119 +277,19 @@ class QueryEngine {
                                         const GenericMBR& query_mbr, const std::vector<std::string>& target_symbols = {},
                                         uint32_t target_symbol_id = 0, Side target_side = Side::None,
                                         QueryMetrics* out_metrics = nullptr) {
-        std::vector<T> matching_records;
         QueryMetrics metrics;
-
-        metrics.files_considered = 1;
-
-        // Stage 1 & 2: Traversal of Level 1 File R-Tree & Level 2 Page R-Tree (.index) across N dimensions
-        HierarchicalRTree rtree;
-        bool has_index = SidecarIndex::read_index(sidecar_index_path, rtree);
-
-        std::vector<RTreeEntry> candidate_rgs;
-        std::vector<PageMBR> candidate_pages;
-
-        if (has_index) {
-            candidate_rgs = rtree.search(query_mbr);
-            candidate_pages = rtree.search_pages(query_mbr);
-
-            metrics.row_groups_selected = candidate_rgs.size();
-            metrics.row_groups_considered = rtree.total_leaf_entries();
-            if (candidate_rgs.empty() && metrics.row_groups_considered > 0) {
-                metrics.files_pruned = 1;
-                if (out_metrics) *out_metrics = metrics;
-                return matching_records;  // File pruned via N-Dimensional R-Tree sidecar!
-            }
+        auto stream = execute_stream<T>(parquet_path, sidecar_index_path, query_mbr, target_symbols, target_symbol_id, target_side, &metrics);
+        std::vector<T> matching_records;
+        while (stream.has_next()) {
+            auto batch = stream.fetch_next_batch(4096);
+            matching_records.insert(matching_records.end(), batch.begin(), batch.end());
         }
-
-        // Stage 3 & 4: Parquet Page Reading & Generic MBR Spatial Filtering
-        std::vector<T> all_records;
-        if (has_index) {
-            std::vector<int> rg_indices;
-            rg_indices.reserve(candidate_rgs.size());
-            for (const auto& rg : candidate_rgs) {
-                rg_indices.push_back(rg.row_group_id);
-            }
-            if (rg_indices.empty()) {
-                all_records = {}; // Pruned!
-            } else {
-                all_records = ParquetReader::read_records<T>(parquet_path, rg_indices);
-            }
-        } else {
-            all_records = ParquetReader::read_records<T>(parquet_path);
-        }
-        
-        metrics.pages_considered = (all_records.size() + 63) / 64;
-
-        // Sub-Row-Group Symbol Range Slicing: Zero-Scan Pruning for Non-Matching Symbols
-        std::vector<SymbolRange> compact_ranges;
-        if (has_index && target_symbol_id > 0) {
-            compact_ranges = rtree.symbol_directory().get_compact_symbol_ranges(target_symbol_id, 4);
-        }
-
-        auto check_symbol = [&target_symbols, target_symbol_id](const T& rec) -> bool {
-            if (!target_symbols.empty()) {
-                if constexpr (requires { rec.symbol; }) {
-                    return std::find(target_symbols.begin(), target_symbols.end(), rec.symbol) != target_symbols.end();
-                }
-            }
-            if (target_symbol_id > 0) {
-                if constexpr (requires { rec.symbol_id; }) {
-                    return rec.symbol_id == target_symbol_id;
-                }
-            }
-            return true;
-        };
-
-        auto check_side = [target_side](const T& rec) -> bool {
-            if (target_side == Side::None) return true;
-            if constexpr (requires { rec.side; }) {
-                return rec.side == target_side;
-            }
-            return true;
-        };
-
-        if (!compact_ranges.empty()) {
-            size_t examined = 0;
-            for (const auto& sr : compact_ranges) {
-                size_t end_idx = std::min<size_t>(sr.start_row + sr.count, all_records.size());
-                for (size_t i = sr.start_row; i < end_idx; ++i) {
-                    examined++;
-                    const auto& rec = all_records[i];
-                    if (!check_symbol(rec)) continue;
-                    if (!check_side(rec)) continue;
-                    auto rec_mbr = extract_mbr(rec);
-                    if (rec_mbr.intersects(query_mbr)) {
-                        matching_records.push_back(rec);
-                    }
-                }
-            }
-            metrics.records_examined = examined;
-        } else {
-            metrics.records_examined = all_records.size();
-            for (const auto& rec : all_records) {
-                if (!check_symbol(rec)) continue;
-                if (!check_side(rec)) continue;
-                auto rec_mbr = extract_mbr(rec);
-                if (rec_mbr.intersects(query_mbr)) {
-                    matching_records.push_back(rec);
-                }
-            }
-        }
-
         metrics.records_returned = matching_records.size();
-        metrics.pages_read = candidate_pages.empty()
-                                 ? ((matching_records.empty()) ? 0 : ((matching_records.size() + 63) / 64))
-                                 : candidate_pages.size();
-
-        if (metrics.pages_considered > 0) {
-            metrics.page_pruning_ratio =
-                1.0 - (static_cast<double>(metrics.pages_read) / static_cast<double>(metrics.pages_considered));
-            if (metrics.page_pruning_ratio < 0.0) metrics.page_pruning_ratio = 0.0;
+        if (metrics.records_examined == 0) {
+            metrics.records_examined = matching_records.size();
         }
         if (metrics.records_returned > 0) {
-            metrics.read_amplification =
-                static_cast<double>(metrics.records_examined) / static_cast<double>(metrics.records_returned);
+            metrics.read_amplification = static_cast<double>(metrics.records_examined) / static_cast<double>(metrics.records_returned);
         } else {
             metrics.read_amplification = 0.0;
         }

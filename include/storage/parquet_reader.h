@@ -1,6 +1,7 @@
 #pragma once
 
 #include <arrow/api.h>
+#include <parquet/arrow/reader.h>
 
 #include <memory>
 #include <string>
@@ -27,7 +28,26 @@ class ParquetReader {
     ParquetReader() = default;
     ~ParquetReader() = default;
 
-    // Generic templated reader for ANY schema record T
+    // Single-I/O open handle: opens file once and returns reusable FileReader
+    static std::shared_ptr<parquet::arrow::FileReader> open_file(const std::string& filepath);
+
+    // Read embedded index from an open FileReader
+    static std::string read_embedded_index(parquet::arrow::FileReader& reader);
+
+    // Read partial Arrow Table from specific Row Groups using an open FileReader
+    static std::shared_ptr<arrow::Table> read_table(parquet::arrow::FileReader& reader, const std::vector<int>& row_groups);
+
+    // Read typed records from specific Row Groups using an open FileReader
+    template <typename T>
+    static std::vector<T> read_records(parquet::arrow::FileReader& reader, const std::vector<int>& row_groups) {
+        auto table = read_table(reader, row_groups);
+        if (!table) return {};
+        std::vector<T> records;
+        from_columns(*table, records);
+        return records;
+    }
+
+    // Generic templated reader for ANY schema record T (legacy helper)
     template <typename T>
     static std::vector<T> read_records(const std::string& filepath) {
         auto table = read_table(filepath);

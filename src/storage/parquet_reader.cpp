@@ -17,22 +17,49 @@ static std::string to_lower(std::string str) {
     return str;
 }
 
-std::shared_ptr<arrow::Table> ParquetReader::read_table(const std::string& filepath) {
+std::shared_ptr<parquet::arrow::FileReader> ParquetReader::open_file(const std::string& filepath) {
     auto file_result = arrow::io::ReadableFile::Open(filepath);
     if (!file_result.ok()) {
-        std::cerr << "[ParquetReader] Failed to open file: " << filepath << " - " << file_result.status().ToString()
-                  << "\n";
         return nullptr;
     }
     std::shared_ptr<arrow::io::ReadableFile> infile = *file_result;
 
     auto reader_result = parquet::arrow::OpenFile(infile, arrow::default_memory_pool());
     if (!reader_result.ok()) {
-        std::cerr << "[ParquetReader] Failed to initialize Parquet reader: " << reader_result.status().ToString()
-                  << "\n";
         return nullptr;
     }
-    std::unique_ptr<parquet::arrow::FileReader> reader = std::move(*reader_result);
+    return std::shared_ptr<parquet::arrow::FileReader>(std::move(*reader_result));
+}
+
+std::string ParquetReader::read_embedded_index(parquet::arrow::FileReader& reader) {
+    auto metadata = reader.parquet_reader()->metadata();
+    if (!metadata) return "";
+    auto kv_meta = metadata->key_value_metadata();
+    if (!kv_meta) return "";
+
+    int idx = kv_meta->FindKey("tick_db.index.v1");
+    if (idx >= 0) {
+        return kv_meta->value(idx);
+    }
+    return "";
+}
+
+std::shared_ptr<arrow::Table> ParquetReader::read_table(parquet::arrow::FileReader& reader, const std::vector<int>& row_groups) {
+    if (row_groups.empty()) return nullptr;
+    auto table_result = reader.ReadRowGroups(row_groups);
+    if (!table_result.ok()) {
+        std::cerr << "[ParquetReader] Failed to read Parquet table row groups: " << table_result.status().ToString() << "\n";
+        return nullptr;
+    }
+    return *table_result;
+}
+
+std::shared_ptr<arrow::Table> ParquetReader::read_table(const std::string& filepath) {
+    auto reader = open_file(filepath);
+    if (!reader) {
+        std::cerr << "[ParquetReader] Failed to open file: " << filepath << "\n";
+        return nullptr;
+    }
 
     auto table_result = reader->ReadTable();
     if (!table_result.ok()) {
@@ -43,56 +70,19 @@ std::shared_ptr<arrow::Table> ParquetReader::read_table(const std::string& filep
 }
 
 std::shared_ptr<arrow::Table> ParquetReader::read_table(const std::string& filepath, const std::vector<int>& row_groups) {
-    if (row_groups.empty()) {
-        // If we want no row groups, just return an empty table or read 0 rows.
-        // Returning nullptr might crash upstream, so let's just let it try or return empty.
-        // Actually, let's just return a schema-only table by reading nothing, but it's easier to just return nullptr and handle it.
-        // For simplicity, we just check before calling this function.
-    }
-
-    auto file_result = arrow::io::ReadableFile::Open(filepath);
-    if (!file_result.ok()) {
-        std::cerr << "[ParquetReader] Failed to open file: " << filepath << " - " << file_result.status().ToString()
-                  << "\n";
+    if (row_groups.empty()) return nullptr;
+    auto reader = open_file(filepath);
+    if (!reader) {
+        std::cerr << "[ParquetReader] Failed to open file: " << filepath << "\n";
         return nullptr;
     }
-    std::shared_ptr<arrow::io::ReadableFile> infile = *file_result;
-
-    auto reader_result = parquet::arrow::OpenFile(infile, arrow::default_memory_pool());
-    if (!reader_result.ok()) {
-        std::cerr << "[ParquetReader] Failed to initialize Parquet reader: " << reader_result.status().ToString()
-                  << "\n";
-        return nullptr;
-    }
-    std::unique_ptr<parquet::arrow::FileReader> reader = std::move(*reader_result);
-
-    auto table_result = reader->ReadRowGroups(row_groups);
-    if (!table_result.ok()) {
-        std::cerr << "[ParquetReader] Failed to read Parquet table row groups: " << table_result.status().ToString() << "\n";
-        return nullptr;
-    }
-    return *table_result;
+    return read_table(*reader, row_groups);
 }
 
 std::string ParquetReader::read_embedded_index(const std::string& filepath) {
-    auto file_result = arrow::io::ReadableFile::Open(filepath);
-    if (!file_result.ok()) return "";
-    std::shared_ptr<arrow::io::ReadableFile> infile = *file_result;
-
-    auto reader_result = parquet::arrow::OpenFile(infile, arrow::default_memory_pool());
-    if (!reader_result.ok()) return "";
-    std::unique_ptr<parquet::arrow::FileReader> reader = std::move(*reader_result);
-
-    auto metadata = reader->parquet_reader()->metadata();
-    if (!metadata) return "";
-    auto kv_meta = metadata->key_value_metadata();
-    if (!kv_meta) return "";
-
-    int idx = kv_meta->FindKey("tick_db.index.v1");
-    if (idx >= 0) {
-        return kv_meta->value(idx);
-    }
-    return "";
+    auto reader = open_file(filepath);
+    if (!reader) return "";
+    return read_embedded_index(*reader);
 }
 
 bool ParquetReader::read_raw_columns(const std::string& filepath, std::vector<RawColumn>& out_columns,

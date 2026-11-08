@@ -71,3 +71,12 @@ target_link_libraries(tick_db_cli
     PRIVATE
     tick_db_lib
 )
+
+add_executable(tick_db_bench
+    benchmarks/benchmark_engine.cpp
+)
+
+target_link_libraries(tick_db_bench
+    PRIVATE
+    tick_db_lib
+)

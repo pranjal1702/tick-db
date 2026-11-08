@@ -38,6 +38,7 @@ struct RTreeEntry {
 struct RTreeNode {
     bool is_leaf{true};
     DynamicMBR mbr;
+    uint64_t symbol_bitmask{0};
     std::vector<RTreeEntry> entries;                   // Populated if is_leaf == true
     std::vector<std::shared_ptr<RTreeNode>> children;  // Populated if is_leaf == false
 };
@@ -52,10 +53,10 @@ class HierarchicalRTree {
     void insert(const RTreeEntry& entry);
 
     // Search hierarchical R-Tree subtrees across N dimensions and return matching candidate entries
-    std::vector<RTreeEntry> search(const DynamicMBR& query_mbr) const;
+    std::vector<RTreeEntry> search(const DynamicMBR& query_mbr, uint32_t target_symbol_id = 0) const;
 
     // Search Level 2 Page MBRs for a matching query MBR across N dimensions
-    std::vector<PageMBR> search_pages(const DynamicMBR& query_mbr) const;
+    std::vector<PageMBR> search_pages(const DynamicMBR& query_mbr, uint32_t target_symbol_id = 0) const;
 
     // Root node accessors for serialization
     std::shared_ptr<RTreeNode> root() const { return root_; }
@@ -69,7 +70,7 @@ class HierarchicalRTree {
 
    private:
     void search_node(const std::shared_ptr<RTreeNode>& node, const DynamicMBR& query_mbr,
-                     std::vector<RTreeEntry>& results) const;
+                     uint32_t target_symbol_id, std::vector<RTreeEntry>& results) const;
     void insert_node(std::shared_ptr<RTreeNode>& node, const RTreeEntry& entry);
     void split_node(std::shared_ptr<RTreeNode>& node);
 
@@ -119,14 +120,16 @@ class RTree {
         }
     }
 
-    std::vector<RTreeEntry> search(const MBRType& query_mbr) const {
+    std::vector<RTreeEntry> search(const MBRType& query_mbr, uint32_t target_symbol_id = 0) const {
         DynamicMBR dyn_query;
         dyn_query.min_bounds.assign(query_mbr.min_bounds.begin(), query_mbr.min_bounds.end());
         dyn_query.max_bounds.assign(query_mbr.max_bounds.begin(), query_mbr.max_bounds.end());
-        return inner_.search(dyn_query);
+        return inner_.search(dyn_query, target_symbol_id);
     }
 
-    std::vector<RTreeEntry> search(const DynamicMBR& query_mbr) const { return inner_.search(query_mbr); }
+    std::vector<RTreeEntry> search(const DynamicMBR& query_mbr, uint32_t target_symbol_id = 0) const {
+        return inner_.search(query_mbr, target_symbol_id);
+    }
 
     HierarchicalRTree& inner() { return inner_; }
     const HierarchicalRTree& inner() const { return inner_; }

@@ -1,0 +1,23 @@
+{
+  "pruning": {
+    "full_scan_latency_us": 64051.9,
+    "indexed_latency_us": 62382.5,
+    "speedup": 1.02676,
+    "full_scan_read_amp": 100,
+    "indexed_read_amp": 9.996
+  },
+  "streaming_memory": {
+    "record_counts": [10000, 50000, 100000, 250000, 500000],
+    "vector_buffering_mb": [4.81035,7.25176,10.3035,19.4588,34.7176],
+    "streaming_mb": [4.45,4.45,4.45,4.45,4.45]
+  },
+  "kway_merge": {
+    "fanouts": [2, 4, 8, 16, 32],
+    "throughput_m_per_sec": [1.48669,0.970357,0.774794,0.699214,0.610074]
+  },
+  "multi_day_query": {
+    "days": [1, 5, 10, 15, 20],
+    "latency_ms": [9.33089,36.3854,61.8905,92.3699,118.766],
+    "records": [376,1880,3760,5640,7520]
+  }
+}

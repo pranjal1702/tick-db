@@ -66,7 +66,8 @@ inline std::shared_ptr<arrow::Table> to_columns(std::span<const OhlcvRecord> rec
 inline void from_columns(const arrow::Table& table, std::vector<OhlcvRecord>& out_records) {
     out_records.clear();
     int64_t num_rows = table.num_rows();
-    out_records.reserve(num_rows);
+    if (num_rows == 0) return;
+    out_records.resize(num_rows);
 
     auto ts_col = table.GetColumnByName("ts_exchange_ns");
     auto sym_col = table.GetColumnByName("symbol");
@@ -76,19 +77,45 @@ inline void from_columns(const arrow::Table& table, std::vector<OhlcvRecord>& ou
     auto close_col = table.GetColumnByName("close");
     auto vol_col = table.GetColumnByName("volume");
 
-    if (!ts_col || !open_col || !close_col) return;
-
-    for (int64_t i = 0; i < num_rows; ++i) {
-        OhlcvRecord r;
-        if (ts_col) r.ts_exchange_ns = std::static_pointer_cast<arrow::UInt64Array>(ts_col->chunk(0))->Value(i);
-        if (sym_col) r.symbol = std::static_pointer_cast<arrow::StringArray>(sym_col->chunk(0))->GetString(i);
-        if (open_col) r.open = std::static_pointer_cast<arrow::Int64Array>(open_col->chunk(0))->Value(i);
-        if (high_col) r.high = std::static_pointer_cast<arrow::Int64Array>(high_col->chunk(0))->Value(i);
-        if (low_col) r.low = std::static_pointer_cast<arrow::Int64Array>(low_col->chunk(0))->Value(i);
-        if (close_col) r.close = std::static_pointer_cast<arrow::Int64Array>(close_col->chunk(0))->Value(i);
-        if (vol_col) r.volume = std::static_pointer_cast<arrow::Int64Array>(vol_col->chunk(0))->Value(i);
-        out_records.push_back(r);
+    if (ts_col) {
+        int64_t offset = 0;
+        for (int c = 0; c < ts_col->num_chunks(); ++c) {
+            auto arr = std::static_pointer_cast<arrow::UInt64Array>(ts_col->chunk(c));
+            for (int64_t i = 0; i < arr->length(); ++i) {
+                out_records[offset + i].ts_exchange_ns = arr->Value(i);
+            }
+            offset += arr->length();
+        }
     }
+
+    if (sym_col) {
+        int64_t offset = 0;
+        for (int c = 0; c < sym_col->num_chunks(); ++c) {
+            auto arr = std::static_pointer_cast<arrow::StringArray>(sym_col->chunk(c));
+            for (int64_t i = 0; i < arr->length(); ++i) {
+                out_records[offset + i].symbol = arr->GetString(i);
+            }
+            offset += arr->length();
+        }
+    }
+
+    auto extract_int64 = [&](std::shared_ptr<arrow::ChunkedArray> col, auto setter) {
+        if (!col) return;
+        int64_t offset = 0;
+        for (int c = 0; c < col->num_chunks(); ++c) {
+            auto arr = std::static_pointer_cast<arrow::Int64Array>(col->chunk(c));
+            for (int64_t i = 0; i < arr->length(); ++i) {
+                setter(out_records[offset + i], arr->Value(i));
+            }
+            offset += arr->length();
+        }
+    };
+
+    extract_int64(open_col, [](OhlcvRecord& r, int64_t v) { r.open = v; });
+    extract_int64(high_col, [](OhlcvRecord& r, int64_t v) { r.high = v; });
+    extract_int64(low_col, [](OhlcvRecord& r, int64_t v) { r.low = v; });
+    extract_int64(close_col, [](OhlcvRecord& r, int64_t v) { r.close = v; });
+    extract_int64(vol_col, [](OhlcvRecord& r, int64_t v) { r.volume = v; });
 }
 
 }  // namespace tick_db
