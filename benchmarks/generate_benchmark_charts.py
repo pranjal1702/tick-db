@@ -159,9 +159,88 @@ plt.close()
 print("Saved docs/benchmark_end_to_end_latency.png")
 
 # -------------------------------------------------------------
-# CHART 5: Unified Executive Benchmark Dashboard
+# CHART 5: Limit Order Book (LOB) Reconstruction Throughput
 # -------------------------------------------------------------
-fig, axs = plt.subplots(2, 2, figsize=(16, 11), facecolor='#0f172a')
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6), facecolor='#0f172a')
+for ax in (ax1, ax2):
+    ax.set_facecolor('#0b1120')
+    ax.grid(True)
+
+lob_data = data['lob_replay']
+# 5A. Throughput
+b1 = ax1.bar(['L3 Order Lifecycle\nReconstruction'], [lob_data['throughput_m_per_sec']], 
+             color='#10b981', width=0.35, edgecolor='#334155', linewidth=1.5)
+ax1.set_title('L3 Order Book Replay Throughput\n(Add, Modify, Cancel, Execute)', color='#f8fafc', fontsize=13, weight='bold', pad=12)
+ax1.set_ylabel('Throughput (Million Events / Sec)', color='#94a3b8', fontsize=11)
+ax1.tick_params(colors='#94a3b8', labelsize=10)
+for bar in b1:
+    yval = bar.get_height()
+    ax1.text(bar.get_x() + bar.get_width() / 2.0, yval + 0.05, f'{yval:.2f} M/s', 
+             ha='center', va='bottom', color='#f8fafc', fontsize=12, weight='bold')
+
+# 5B. Latency per event
+b2 = ax2.bar(['Latency per Event'], [lob_data['ns_per_event']], 
+             color='#38bdf8', width=0.35, edgecolor='#334155', linewidth=1.5)
+ax2.set_title('Average Replay & Matching Latency\n(Nanoseconds per L3 Event)', color='#f8fafc', fontsize=13, weight='bold', pad=12)
+ax2.set_ylabel('Latency (ns / event)', color='#94a3b8', fontsize=11)
+ax2.tick_params(colors='#94a3b8', labelsize=10)
+for bar in b2:
+    yval = bar.get_height()
+    ax2.text(bar.get_x() + bar.get_width() / 2.0, yval + 20, f'{yval:.1f} ns', 
+             ha='center', va='bottom', color='#f8fafc', fontsize=12, weight='bold')
+
+plt.suptitle('OrderBook Microstructure Engine: L3 Event Processing Speed (500,000 Events)', 
+             color='#38bdf8', fontsize=15, weight='bold', y=0.98)
+plt.tight_layout(rect=[0, 0, 1, 0.94])
+plt.savefig('docs/benchmark_lob_throughput.png', dpi=200)
+plt.close()
+print("Saved docs/benchmark_lob_throughput.png")
+
+# -------------------------------------------------------------
+# CHART 6: 2D Space-Filling Compaction (Hilbert vs Morton vs Chronological)
+# -------------------------------------------------------------
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6), facecolor='#0f172a')
+for ax in (ax1, ax2):
+    ax.set_facecolor('#0b1120')
+    ax.grid(True)
+
+sp_data = data['spatial_compaction']
+methods = sp_data['methods']
+rec_exam = sp_data['records_examined']
+lat_us = sp_data['latency_us']
+
+# 6A. Records Examined
+b1 = ax1.bar(methods, rec_exam, color=['#ef4444', '#f59e0b', '#10b981'], width=0.45, edgecolor='#334155', linewidth=1.5)
+ax1.set_title('Records Examined in 2D Window Query\n(Lower is Better - Tighter Spatial Bounding)', color='#f8fafc', fontsize=13, weight='bold', pad=12)
+ax1.set_ylabel('Records Examined from Disk', color='#94a3b8', fontsize=11)
+ax1.tick_params(colors='#94a3b8', labelsize=10)
+ax1.yaxis.set_major_formatter(ticker.FuncFormatter(lambda x, p: f'{int(x):,}'))
+for bar in b1:
+    yval = bar.get_height()
+    ax1.text(bar.get_x() + bar.get_width() / 2.0, yval + 1000, f'{int(yval):,}', 
+             ha='center', va='bottom', color='#f8fafc', fontsize=11, weight='bold')
+
+# 6B. Query Latency
+b2 = ax2.bar(methods, [lat / 1000.0 for lat in lat_us], color=['#ef4444', '#f59e0b', '#10b981'], width=0.45, edgecolor='#334155', linewidth=1.5)
+ax2.set_title('2D Range Query Latency (ms)\n(Time Window + Price Band Filter)', color='#f8fafc', fontsize=13, weight='bold', pad=12)
+ax2.set_ylabel('Execution Latency (ms)', color='#94a3b8', fontsize=11)
+ax2.tick_params(colors='#94a3b8', labelsize=10)
+for bar in b2:
+    yval = bar.get_height()
+    ax2.text(bar.get_x() + bar.get_width() / 2.0, yval + 1.5, f'{yval:.1f} ms', 
+             ha='center', va='bottom', color='#f8fafc', fontsize=11, weight='bold')
+
+plt.suptitle('Spatial Compaction: 2D Hilbert Curve vs. Morton Z-Order vs. Chronological', 
+             color='#38bdf8', fontsize=15, weight='bold', y=0.98)
+plt.tight_layout(rect=[0, 0, 1, 0.94])
+plt.savefig('docs/benchmark_spatial_compaction.png', dpi=200)
+plt.close()
+print("Saved docs/benchmark_spatial_compaction.png")
+
+# -------------------------------------------------------------
+# CHART 7: Unified 6-Panel Executive Benchmark Dashboard
+# -------------------------------------------------------------
+fig, axs = plt.subplots(3, 2, figsize=(16, 16), facecolor='#0f172a')
 for ax in axs.flat:
     ax.set_facecolor('#0b1120')
     ax.grid(True)
@@ -195,9 +274,21 @@ axs[1, 1].set_xlabel('Partitions (Days)', color='#94a3b8')
 axs[1, 1].set_ylabel('Latency (ms)', color='#94a3b8')
 axs[1, 1].tick_params(colors='#94a3b8')
 
-plt.suptitle('tick-db Storage & Query Engine Comprehensive Benchmark Report', 
-             color='#38bdf8', fontsize=16, weight='bold', y=0.98)
-plt.tight_layout(rect=[0, 0, 1, 0.95])
+# 5. LOB Replay Throughput
+axs[2, 0].bar(['L3 LOB Replay (500k ev)'], [lob_data['throughput_m_per_sec']], color='#10b981', width=0.4, edgecolor='#334155')
+axs[2, 0].set_title('LOB Reconstruction Throughput (>1.4M ev/s)', color='#f8fafc', fontsize=12, weight='bold')
+axs[2, 0].set_ylabel('Million Events / Sec', color='#94a3b8')
+axs[2, 0].tick_params(colors='#94a3b8')
+
+# 6. Spatial Compaction
+axs[2, 1].bar(methods, [lat / 1000.0 for lat in lat_us], color=['#ef4444', '#f59e0b', '#10b981'], width=0.45, edgecolor='#334155')
+axs[2, 1].set_title('2D Spatial Compaction Latency (ms)', color='#f8fafc', fontsize=12, weight='bold')
+axs[2, 1].set_ylabel('Latency (ms)', color='#94a3b8')
+axs[2, 1].tick_params(colors='#94a3b8')
+
+plt.suptitle('tick-db Storage & Microstructural Query Engine Comprehensive Benchmark Report', 
+             color='#38bdf8', fontsize=16, weight='bold', y=0.99)
+plt.tight_layout(rect=[0, 0, 1, 0.97])
 plt.savefig('docs/storage_benchmark_dashboard.png', dpi=200)
 plt.close()
 print("Saved docs/storage_benchmark_dashboard.png")

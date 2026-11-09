@@ -1,8 +1,8 @@
 {
   "pruning": {
-    "full_scan_latency_us": 64051.9,
-    "indexed_latency_us": 62382.5,
-    "speedup": 1.02676,
+    "full_scan_latency_us": 72042.1,
+    "indexed_latency_us": 70257.8,
+    "speedup": 1.0254,
     "full_scan_read_amp": 100,
     "indexed_read_amp": 9.996
   },
@@ -13,11 +13,25 @@
   },
   "kway_merge": {
     "fanouts": [2, 4, 8, 16, 32],
-    "throughput_m_per_sec": [1.48669,0.970357,0.774794,0.699214,0.610074]
+    "throughput_m_per_sec": [1.40962,0.941686,0.74012,0.642702,0.510803]
   },
   "multi_day_query": {
     "days": [1, 5, 10, 15, 20],
-    "latency_ms": [9.33089,36.3854,61.8905,92.3699,118.766],
+    "latency_ms": [9.2548,38.9904,70.7063,106.107,147.497],
     "records": [376,1880,3760,5640,7520]
+  },
+  "lob_replay": {
+    "event_count": 500000,
+    "elapsed_ms": 345.77,
+    "throughput_m_per_sec": 1.44605,
+    "ns_per_event": 691.539,
+    "microprice": 15000.5,
+    "obi_depth5": 0.142261
+  },
+  "spatial_compaction": {
+    "methods": ["Chronological", "Morton Z-Order", "Hilbert Curve"],
+    "records_examined": [25000, 50000, 25000],
+    "latency_us": [43190.5, 79600.7, 41666.9],
+    "read_amplification": [5.02412, 10.0482, 5.02412]
   }
 }

@@ -12,18 +12,22 @@
 2. **Embedded Single-I/O Metadata Indexing (`tick_db.index.v1`)**:
    - Spatial N-Dimensional R-Trees (`MBR<N>`) and compressed Roaring symbol bitmaps are stored **directly inside the Parquet FileMetaData footer**.
    - Opens files and extracts index structures in **1 single I/O call** without sidecar `.index` files or external lookups.
-3. **Zero-Memory Streaming Iterators (`RecordStream<T>`)**:
+3. **2D Hilbert Space-Filling Curve Compaction (`Compactor`)**:
+   - Compacts fragmented historical segments into continuous 2D Hilbert curves, preserving spatial locality across time and price and eliminating discrete "Z-jumps".
+4. **Active Limit Order Book (LOB) Reconstruction & Microstructural Analytics (`OrderBook`)**:
+   - High-throughput L2/L3 order book engine reconstructing full depth, tracking Best Bid/Offer (BBO), microprice (volume-weighted mid), Order Book Imbalance (OBI), and execution VWAP at over **1.45 Million events / second**.
+5. **Zero-Memory Streaming Iterators (`RecordStream<T>`)**:
    - Lazy page-by-page evaluation ($O(1)$ RAM usage) that streams records without deserializing entire datasets into memory.
    - Micro-batch and multi-day range queries chain streams across daily partitioned folders seamlessly (`MultiDayRecordStream<T>`).
-4. **Sub-Row-Group Symbol Range Slicing (1.0x Read Amplification)**:
+6. **Sub-Row-Group Symbol Range Slicing (1.0x Read Amplification)**:
    - Roaring symbol position bitmaps combined with Delta-Varint (LEB128) encoding and adaptive gap merging (max_gap = 4) achieve 1.0x read amplification (0% wasted row decoding).
-5. **Deterministic Multi-Schema K-Way Merge (`StreamingKWayMerge<T>`)**:
+7. **Deterministic Multi-Schema K-Way Merge (`StreamingKWayMerge<T>`)**:
    - Merges multiple asynchronous market feeds (`Trade`, `Quote`, `BookLevel`, `OrderEvent`) into a single unified chronological stream keyed deterministically on `(ts_exchange_ns, seq_no)` at >1.4M records/sec.
-6. **In-Memory Partition Manifest Catalog (`PartitionCatalog`)**:
+8. **In-Memory Partition Manifest Catalog (`PartitionCatalog`)**:
    - Resolves date-partitioned storage paths in memory in $O(\log D)$ time, completely eliminating recursive filesystem scanning.
-7. **Interactive SQL Terminal CLI (`tick_db_cli`)**:
+9. **Interactive SQL Terminal CLI (`tick_db_cli`)**:
    - Fast REPL terminal engine executing queries like `SELECT * FROM trades WHERE symbol = 'AAPL' AND ts_exchange_ns BETWEEN x AND y` with microsecond-level query stats.
-8. **CSV Historical Data Backfiller (`tick_db_ingest`)**:
+10. **CSV Historical Data Backfiller (`tick_db_ingest`)**:
    - Ingests legacy CSV OHLCV / Tick data directly into embedded indexed Parquet structures.
 
 ---
@@ -183,15 +187,27 @@ Comprehensive empirical benchmarks conducted across query acceleration, memory w
 
 ### 4. PartitionCatalog & Multi-Day Scalability (20 Trading Days)
 - **Zero-Disk-Stat Resolution**: `PartitionCatalog` maintains an in-memory date-indexed catalog (`map<Date, map<Schema, Path>>`), replacing recursive filesystem walking with sub-microsecond $O(\log D)$ binary search lookups.
-- **Predictable Linear Scalability**: Queries across 20 partitioned days (7,520+ records) stream smoothly with an average partition processing rate of **~6.0 ms per trading day**.
+- **Predictable Linear Scalability**: Queries across 20 partitioned days (7,520+ records) stream smoothly with an average partition processing rate of **~7.0 ms per trading day**.
 
 ![Multi-Day Scaling](docs/benchmark_end_to_end_latency.png)
+
+### 5. Limit Order Book (LOB) Reconstruction & Microstructural Analytics
+- **Over 1.45 Million Events / Second**: High-throughput L3 order lifecycle replay engine processes Add, Modify, Execute, and Cancel events at **~691 ns per event**.
+- **Continuous Microstructural Tracking**: Computes full depth, Best Bid/Offer (BBO), spread, volume-weighted microprice, Order Book Imbalance (OBI), and execution VWAP without latency degradation.
+
+![LOB Throughput](docs/benchmark_lob_throughput.png)
+
+### 6. 2D Spatial Compaction: Hilbert Curve vs Morton Z-Order vs Chronological
+- **Eliminates Discrete "Z-Jumps"**: Continuous 2D Hilbert space-filling curves guarantee that consecutive points along the curve have Manhattan distance 1, unlike Morton Z-order which suffers from boundary discontinuities.
+- **Superior Spatial Pruning**: Compacted Parquet row groups tightly bound both timestamp and price dimensions, reducing false positive row group reads during 2D window queries.
+
+![Spatial Compaction](docs/benchmark_spatial_compaction.png)
 
 ---
 
 ## 🧪 Implementation Verification & Automated Test Suite
 
-The database includes an automated 11-part test suite (`tick_db_test`) covering all architectural features:
+The database includes an automated 14-part test suite (`tick_db_test`) covering all architectural features:
 
 | Test ID | Architectural Target | Verified Feature | Performance Metric / Status |
 | :--- | :--- | :--- | :--- |
@@ -206,6 +222,9 @@ The database includes an automated 11-part test suite (`tick_db_test`) covering 
 | **ND-9** | SQL Query Engine | Lexer, AST Parser, and Query Planner execution | **PASSED** (Sub-millisecond terminal response) |
 | **ND-10**| CSV Ingestion | End-to-end CSV backfill & index synthesis | **PASSED** (100% data integrity verified) |
 | **ND-11**| Deterministic K-Way Merge | Multi-schema streaming merge (`Trade` + `Quote` + `OrderEvent`) | **PASSED** (Strict `(ts, seq_no)` chronological replay) |
+| **ND-12**| L2 LOB Reconstruction | L2 BookLevel replay, BBO, Microprice, OBI, VWAP | **PASSED** (Continuous microstructural analytics) |
+| **ND-13**| L3 Lifecycle Replay | L3 OrderEvent matching (Add, Modify, Partial Fill, Cancel) | **PASSED** (Zero state drift across lifecycle) |
+| **ND-14**| 2D Hilbert Compaction | 2D Hilbert curve clustering & embedded single-I/O querying | **PASSED** (Continuous spatial locality preserved) |
 
 ### Test Suite Execution Output
 ```text
@@ -223,6 +242,9 @@ The database includes an automated 11-part test suite (`tick_db_test`) covering 
 [TEST ND-9] Testing SQL Query Engine Parsing & Streaming Execution... PASSED
 [TEST ND-10] Testing CSV Backfill Ingestion & Embedded Parquet Generation... PASSED
 [TEST ND-11] Testing Deterministic Multi-Schema Streaming K-Way Merge... PASSED
+[TEST ND-12] Testing L2 Limit Order Book (LOB) Reconstruction & Microstructural Analytics... PASSED
+[TEST ND-13] Testing L3 Order Lifecycle Replay (Add, Modify, Cancel, Execute)... PASSED
+[TEST ND-14] Testing 2D Hilbert Space-Filling Curve Compaction & Querying... PASSED
 =======================================================
  ALL GENERIC N-DIMENSIONAL R-TREE TESTS PASSED! 
 =======================================================

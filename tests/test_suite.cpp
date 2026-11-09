@@ -17,7 +17,10 @@ struct CustomSymbolTrade {
 #include "backfill/csv_backfiller.h"
 #include "catalog/catalog.h"
 #include "catalog/symbol_catalog.h"
+#include "clustering/compactor.h"
+#include "clustering/hilbert.h"
 #include "live/collector.h"
+#include "orderbook/order_book.h"
 #include "query/kway_merge.h"
 #include "query/query_engine.h"
 #include "query/sql_query_engine.h"
@@ -490,6 +493,147 @@ void test_streaming_kway_merge_and_multi_schema_replay() {
     std::cout << "  - Deterministic Multi-Schema Replay (Trades+Quotes+OrderEvents, 7 items strictly ordered): PASSED\n";
 }
 
+void test_order_book_l2_reconstruction() {
+    std::cout << "\n[TEST ND-12] Testing L2 Limit Order Book (LOB) Reconstruction & Microstructural Analytics...\n";
+
+    tick_db::OrderBook book("AAPL");
+
+    // Feed L2 3 bid levels and 3 ask levels
+    std::vector<tick_db::BookLevel> levels = {
+        {1000000, 1, 0, tick_db::Side::Bid, 15000, 500},
+        {1000000, 2, 1, tick_db::Side::Bid, 14990, 800},
+        {1000000, 3, 2, tick_db::Side::Bid, 14980, 1200},
+        {1000000, 4, 0, tick_db::Side::Ask, 15010, 300},
+        {1000000, 5, 1, tick_db::Side::Ask, 15020, 700},
+        {1000000, 6, 2, tick_db::Side::Ask, 15030, 1000}
+    };
+    book.apply_book_levels(levels);
+
+    assert(book.is_valid_bbo());
+    assert(book.best_bid_price() == 15000);
+    assert(book.best_bid_size() == 500);
+    assert(book.best_ask_price() == 15010);
+    assert(book.best_ask_size() == 300);
+    assert(book.spread() == 10);
+    assert(book.mid_price() == 15005.0);
+
+    // Microprice: (300 * 15000 + 500 * 15010) / (300 + 500) = (4500000 + 7505000) / 800 = 12005000 / 800 = 15006.25
+    double micro = book.microprice();
+    assert(std::abs(micro - 15006.25) < 0.001);
+
+    // OBI across top 3 levels:
+    // Bid vol: 500 + 800 + 1200 = 2500
+    // Ask vol: 300 + 700 + 1000 = 2000
+    // OBI = (2500 - 2000) / (2500 + 2000) = 500 / 4500 = 0.1111...
+    double obi = book.order_book_imbalance(3);
+    assert(std::abs(obi - (500.0 / 4500.0)) < 0.001);
+
+    // VWAP to buy 600 shares from asks:
+    // 300 @ 15010 = 4,503,000
+    // 300 @ 15020 = 4,506,000
+    // Total = 9,009,000 / 600 = 15015.0
+    double vwap_buy = book.vwap(tick_db::Side::Ask, 600);
+    assert(std::abs(vwap_buy - 15015.0) < 0.001);
+
+    // Delete best bid level (size = 0)
+    book.apply_book_level({1000010, 7, 0, tick_db::Side::Bid, 15000, 0});
+    assert(book.best_bid_price() == 14990);
+    assert(book.best_bid_size() == 800);
+    assert(book.spread() == 20);
+
+    std::cout << "  - L2 Order Book BBO, Microprice, OBI, and VWAP Execution Slicing: PASSED\n";
+}
+
+void test_order_book_l3_event_matching() {
+    std::cout << "\n[TEST ND-13] Testing L3 Order Lifecycle Replay (Add, Modify, Cancel, Execute)...\n";
+
+    tick_db::OrderBook book("MSFT");
+
+    // 1. Add two bid orders at same price level
+    book.apply_order_event({1000000, 1, 101, tick_db::OrderEventType::Add, tick_db::Side::Bid, 25000, 100});
+    book.apply_order_event({1000001, 2, 102, tick_db::OrderEventType::Add, tick_db::Side::Bid, 25000, 200});
+
+    assert(book.best_bid_price() == 25000);
+    assert(book.best_bid_size() == 300);
+    assert(book.total_active_orders() == 2);
+
+    // 2. Add ask order
+    book.apply_order_event({1000002, 3, 201, tick_db::OrderEventType::Add, tick_db::Side::Ask, 25020, 500});
+    assert(book.best_ask_price() == 25020);
+    assert(book.best_ask_size() == 500);
+
+    // 3. Modify order 101: change price to 25010 and size to 150
+    book.apply_order_event({1000003, 4, 101, tick_db::OrderEventType::Modify, tick_db::Side::Bid, 25010, 150});
+    assert(book.best_bid_price() == 25010);  // New higher bid!
+    assert(book.best_bid_size() == 150);
+    assert(book.spread() == 10);
+
+    // 4. Partial execute order 201 for 200 shares
+    book.apply_order_event({1000004, 5, 201, tick_db::OrderEventType::Execute, tick_db::Side::Ask, 25020, 200});
+    assert(book.best_ask_size() == 300);
+
+    // 5. Cancel remaining 300 shares of order 201
+    book.apply_order_event({1000005, 6, 201, tick_db::OrderEventType::Cancel, tick_db::Side::Ask, 25020, 300});
+    assert(!book.has_ask());
+    assert(book.total_active_orders() == 2);
+
+    std::cout << "  - L3 Order Lifecycle Replay (Add, Modify, Partial Fill, Cancel): PASSED\n";
+}
+
+void test_hilbert_curve_clustering() {
+    std::cout << "\n[TEST ND-14] Testing 2D Hilbert Space-Filling Curve Compaction & Querying...\n";
+
+    // 1. Verify 2D Hilbert continuity: consecutive points on order 1 Hilbert curve have Manhattan distance 1
+    uint32_t h0 = tick_db::hilbert_encode(0, 0);
+    uint32_t h1 = tick_db::hilbert_encode(1, 0);
+    uint32_t h2 = tick_db::hilbert_encode(1, 1);
+    uint32_t h3 = tick_db::hilbert_encode(0, 1);
+    assert(h0 == 0);
+    assert(h1 == 1);
+    assert(h2 == 2);
+    assert(h3 == 3);
+
+    // 2. Create segment files and compact with Hilbert curve
+    std::string seg1 = "/tmp/seg1_trades.parquet";
+    std::string seg2 = "/tmp/seg2_trades.parquet";
+    std::string compacted_file = "/tmp/hilbert_compacted_trades.parquet";
+
+    std::vector<tick_db::Trade> seg1_trades;
+    std::vector<tick_db::Trade> seg2_trades;
+
+    for (uint64_t i = 1; i <= 50; ++i) {
+        seg1_trades.push_back({1000000 + i * 20, i, 1, static_cast<int64_t>(15000 + i * 2), 100, tick_db::Side::Bid});
+        seg2_trades.push_back({1000010 + i * 20, i + 50, 1, static_cast<int64_t>(15001 + i * 2), 200, tick_db::Side::Ask});
+    }
+
+    assert(tick_db::ParquetWriter::write_trades(seg1, seg1_trades));
+    assert(tick_db::ParquetWriter::write_trades(seg2, seg2_trades));
+
+    // Run Hilbert Compaction
+    assert(tick_db::Compactor::compact_trades({seg1, seg2}, compacted_file, tick_db::ClusteringMethod::HilbertCurve, 50));
+
+    // Verify compacted file has embedded index and can be queried via QueryEngine
+    tick_db::HierarchicalRTree restored;
+    assert(tick_db::SidecarIndex::read_index(compacted_file, restored));
+    assert(restored.total_leaf_entries() == 2);
+
+    tick_db::DynamicMBR full_mbr;
+    full_mbr.min_bounds = {0, 0, 0, 0, 0};
+    full_mbr.max_bounds = {std::numeric_limits<int64_t>::max(), std::numeric_limits<int64_t>::max(),
+                           std::numeric_limits<int64_t>::max(), std::numeric_limits<int64_t>::max(),
+                           std::numeric_limits<int64_t>::max()};
+
+    auto stream = tick_db::QueryEngine::execute_stream<tick_db::Trade>(compacted_file, compacted_file, full_mbr);
+    size_t count = 0;
+    while (stream.has_next()) {
+        stream.next();
+        count++;
+    }
+    assert(count == 100);
+
+    std::cout << "  - 2D Hilbert Space-Filling Compaction & Embedded Single-I/O Querying (100 records): PASSED\n";
+}
+
 int main() {
     std::cout << "=======================================================\n";
     std::cout << " Running Generic N-Dimensional R-Tree Architecture Tests\n";
@@ -506,6 +650,9 @@ int main() {
     test_sql_query_engine();
     test_csv_backfiller();
     test_streaming_kway_merge_and_multi_schema_replay();
+    test_order_book_l2_reconstruction();
+    test_order_book_l3_event_matching();
+    test_hilbert_curve_clustering();
 
     std::cout << "\n=======================================================\n";
     std::cout << " ALL GENERIC N-DIMENSIONAL R-TREE TESTS PASSED! \n";
